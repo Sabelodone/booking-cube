@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "strict": true,
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["app/src/*"]
+    },
+    "types": ["vite/client"]  // ← Add this line
+  },
+  "include": [
+    "app/src/**/*.ts", 
+    "app/src/**/*.tsx",
+    "app/src/vite-env.d.ts"  // ← Make sure this is included
+  ],
+  "exclude": ["node_modules"]
+}
