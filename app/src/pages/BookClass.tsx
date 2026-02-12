@@ -1,7 +1,7 @@
 ﻿import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import api from '../utils/axiosConfig'; // Import centralized axios
+import api from '../utils/axiosConfig';
 import Navigation from '../components/Navigation';
 import { Calendar, Clock, Users, CreditCard, X, AlertCircle, Loader2 } from 'lucide-react';
 
@@ -19,8 +19,31 @@ interface Session {
   available: boolean;
 }
 
+// EXACT MATCH for your server response
+interface BookingResponse {
+  success: boolean;
+  message: string;
+  booking_id: string;
+  booking: {
+    id: string;
+    user_id: string;
+    session_id: string;
+    status: string;
+    payment_status: string;
+    amount: number;
+    student_notes?: string;
+    session?: Session;
+  };
+  payment: {
+    payment_id: string;
+    status: string;
+  };
+  redirect_to_payment: boolean;
+  redirect_url: string;
+}
+
 const BookClass: React.FC = () => {
-  const { getAuthHeader } = useAuth();
+  const { user } = useAuth();
   const navigate = useNavigate();
 
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -33,6 +56,8 @@ const BookClass: React.FC = () => {
   const [booking, setBooking] = useState(false);
   const [studentNotes, setStudentNotes] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [bookingSuccess, setBookingSuccess] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     fetchSessions();
@@ -45,7 +70,6 @@ const BookClass: React.FC = () => {
   const fetchSessions = async () => {
     try {
       setLoading(true);
-      // Use the centralized axios instance
       const response = await api.get<Session[]>('/sessions', {
         params: { available_only: true }
       });
@@ -66,15 +90,12 @@ const BookClass: React.FC = () => {
 
   const filterSessions = () => {
     let filtered = sessions;
-
     if (selectedType !== 'all') {
       filtered = filtered.filter(s => s.session_type === selectedType);
     }
-
     if (selectedSubject !== 'all') {
       filtered = filtered.filter(s => s.subject === selectedSubject);
     }
-
     setFilteredSessions(filtered);
   };
 
@@ -83,6 +104,8 @@ const BookClass: React.FC = () => {
     setShowModal(true);
     setStudentNotes('');
     setError(null);
+    setBookingSuccess(false);
+    setRetryCount(0);
   };
 
   const handleBookConfirm = async () => {
@@ -90,9 +113,9 @@ const BookClass: React.FC = () => {
 
     setBooking(true);
     setError(null);
+    setBookingSuccess(false);
 
     try {
-      // Check if user is logged in
       const token = localStorage.getItem('token');
       if (!token) {
         setError('You need to be logged in to book a session.');
@@ -103,36 +126,85 @@ const BookClass: React.FC = () => {
 
       console.log('📝 Creating booking for session:', selectedSession.id);
       
-      // Use the centralized axios instance (it automatically adds the token)
-      const response = await api.post('/bookings', {
+      // ✅ EXACT MATCH for your server response
+      const response = await api.post<BookingResponse>('/bookings', {
         session_id: selectedSession.id,
         student_notes: studentNotes || null,
       });
 
-      const bookingId = response.data.booking.id;
+      const bookingData = response.data;
+      const bookingId = bookingData.booking_id;
       
-      console.log('✅ Booking created:', bookingId);
+      console.log('✅ Booking created successfully:', bookingData);
+      console.log('✅ Booking ID:', bookingId);
+      console.log('🔄 Redirect to payment:', bookingData.redirect_to_payment);
       
-      alert('Booking created successfully! Redirecting to payment...');
+      // Close the modal
       setShowModal(false);
-      fetchSessions(); // Refresh sessions to update availability
       
-      // Redirect to payment page for the new booking
-      navigate(`/payment/${bookingId}`);
+      // Show success message
+      setBookingSuccess(true);
+      
+      // Refresh sessions to update availability
+      fetchSessions();
+      
+      // 🔥 CRITICAL: Redirect to payment page
+      if (bookingData.redirect_to_payment) {
+        console.log('💰 Redirecting to payment page...');
+        setTimeout(() => {
+          navigate(`/payment/${bookingId}`);
+        }, 1500);
+      }
       
     } catch (error: any) {
       console.error('❌ Booking error:', error);
       
-      if (error.response?.status === 401) {
+      // 🔥 Handle 400 - Already booked
+      if (error.response?.status === 400) {
+        const errorMessage = error.response.data?.detail || '';
+        
+        if (errorMessage.includes('already booked')) {
+          setError('You have already booked this session. Redirecting to your bookings...');
+          setTimeout(() => {
+            setShowModal(false);
+            navigate('/my-bookings');
+          }, 2000);
+        } else if (errorMessage.includes('fully booked')) {
+          setError('This session is fully booked. Please select another time.');
+          setTimeout(() => {
+            setShowModal(false);
+            fetchSessions(); // Refresh to update counts
+          }, 3000);
+        } else {
+          setError(errorMessage || 'Booking failed. Please try again.');
+        }
+      }
+      // 🔥 Handle 404 - Session not found
+      else if (error.response?.status === 404) {
+        setError('Session not found. It may have been removed.');
+        setTimeout(() => {
+          setShowModal(false);
+          fetchSessions();
+        }, 2000);
+      }
+      // 🔥 Handle 401 - Unauthorized
+      else if (error.response?.status === 401) {
         setError('Your session has expired. Please login again.');
         navigate('/login');
-      } else if (error.response?.status === 400) {
-        setError(error.response.data.detail || 'Booking failed. The session might be full.');
-      } else if (error.response?.status === 404) {
-        setError('Session not found. It may have been removed.');
-      } else if (error.response?.status === 403) {
-        setError('You are not authorized to book this session.');
-      } else {
+      }
+      // 🔥 Handle 500 - Server error
+      else if (error.response?.status === 500) {
+        setError('Server error. Please try again in a moment.');
+        if (retryCount < 1) {
+          setRetryCount(retryCount + 1);
+          setTimeout(() => handleBookConfirm(), 2000);
+        }
+      }
+      // 🔥 Handle network errors
+      else if (error.code === 'ECONNABORTED' || error.message === 'Network Error') {
+        setError('Connection error. Please check your internet and try again.');
+      }
+      else {
         setError('Booking failed. Please try again.');
       }
     } finally {
@@ -169,6 +241,24 @@ const BookClass: React.FC = () => {
         <h1 className="text-3xl font-bold text-gray-900 mb-2">Book a Class</h1>
         <p className="text-gray-600 mb-6">Choose from available sessions and book your spot</p>
 
+        {/* Booking Success Message */}
+        {bookingSuccess && (
+          <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg animate-pulse">
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <svg className="h-5 w-5 text-green-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <p className="text-sm font-medium text-green-800">
+                  Booking created successfully! Redirecting to payment...
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Error Message */}
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -176,6 +266,17 @@ const BookClass: React.FC = () => {
               <AlertCircle className="h-5 w-5 text-red-500 mr-2" />
               <p className="text-red-700">{error}</p>
             </div>
+            {error.includes('Server error') && retryCount < 1 && (
+              <button 
+                onClick={() => {
+                  setError(null);
+                  handleBookConfirm();
+                }}
+                className="mt-2 text-sm text-blue-600 hover:text-blue-800"
+              >
+                Try Again →
+              </button>
+            )}
           </div>
         )}
 
@@ -195,7 +296,6 @@ const BookClass: React.FC = () => {
                 <option value="one_on_one">1-on-1 Sessions (Weekdays)</option>
               </select>
             </div>
-
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Subject</label>
               <select
@@ -257,9 +357,7 @@ const BookClass: React.FC = () => {
                       <span className="text-gray-600">•</span>
                       <span className="font-semibold text-gray-900 text-lg">{session.subject}</span>
                       <span className="text-gray-600">•</span>
-                      <span className="text-gray-600">
-                        {session.duration_minutes} minutes
-                      </span>
+                      <span className="text-gray-600">{session.duration_minutes} minutes</span>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
@@ -270,7 +368,6 @@ const BookClass: React.FC = () => {
                           <p className="font-medium">{formatDate(session.date)}</p>
                         </div>
                       </div>
-                      
                       <div className="flex items-center space-x-2 text-gray-600">
                         <Clock className="h-5 w-5" />
                         <div>
@@ -278,7 +375,6 @@ const BookClass: React.FC = () => {
                           <p className="font-medium">{session.start_time}</p>
                         </div>
                       </div>
-                      
                       <div className="flex items-center space-x-2 text-gray-600">
                         <Users className="h-5 w-5" />
                         <div>
@@ -286,7 +382,6 @@ const BookClass: React.FC = () => {
                           <p className="font-medium">{session.current_bookings}/{session.max_students} spots filled</p>
                         </div>
                       </div>
-                      
                       <div className="flex items-center space-x-2 text-green-600">
                         <CreditCard className="h-5 w-5" />
                         <div>
@@ -295,27 +390,7 @@ const BookClass: React.FC = () => {
                         </div>
                       </div>
                     </div>
-
-                    {/* Availability Status */}
-                    <div className="mt-4">
-                      {session.current_bookings >= session.max_students ? (
-                        <div className="inline-flex items-center px-3 py-1 rounded-full bg-red-100 text-red-700">
-                          <span className="text-sm font-medium">Fully Booked</span>
-                        </div>
-                      ) : session.max_students - session.current_bookings <= 2 ? (
-                        <div className="inline-flex items-center px-3 py-1 rounded-full bg-yellow-100 text-yellow-700">
-                          <span className="text-sm font-medium">
-                            Only {session.max_students - session.current_bookings} spot{session.max_students - session.current_bookings !== 1 ? 's' : ''} left!
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="inline-flex items-center px-3 py-1 rounded-full bg-green-100 text-green-700">
-                          <span className="text-sm font-medium">Available</span>
-                        </div>
-                      )}
-                    </div>
                   </div>
-
                   <div className="mt-4 md:mt-0 md:ml-6">
                     <button
                       onClick={() => handleBookClick(session)}
@@ -342,62 +417,48 @@ const BookClass: React.FC = () => {
           <div className="bg-white rounded-2xl max-w-md w-full p-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-2xl font-bold text-gray-900">Confirm Booking</h2>
-              <button
-                onClick={() => setShowModal(false)}
-                className="text-gray-400 hover:text-gray-600"
-              >
+              <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600">
                 <X className="h-6 w-6" />
               </button>
             </div>
-
+            
             <div className="space-y-4 mb-6">
               <div>
                 <p className="text-sm text-gray-600">Subject</p>
                 <p className="font-semibold text-gray-900 text-lg">{selectedSession.subject}</p>
               </div>
-              
               <div>
                 <p className="text-sm text-gray-600">Class Type</p>
                 <p className="font-semibold text-gray-900">
                   {selectedSession.session_type === 'group' ? 'Group Class' : '1-on-1 Session'}
                 </p>
               </div>
-              
               <div>
                 <p className="text-sm text-gray-600">Date & Time</p>
                 <p className="font-semibold text-gray-900">
                   {formatDate(selectedSession.date)} at {selectedSession.start_time}
                 </p>
               </div>
-              
               <div>
                 <p className="text-sm text-gray-600">Duration</p>
                 <p className="font-semibold text-gray-900">{selectedSession.duration_minutes} minutes</p>
               </div>
-              
               <div>
                 <p className="text-sm text-gray-600">Price</p>
                 <p className="text-2xl font-bold text-green-600">R{selectedSession.price}</p>
               </div>
-
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Notes (Optional)
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Notes (Optional)</label>
                 <textarea
                   value={studentNotes}
                   onChange={(e) => setStudentNotes(e.target.value)}
-                  placeholder="Any specific topics you'd like to focus on? Learning goals? Questions?"
+                  placeholder="Any specific topics you'd like to focus on?"
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   rows={3}
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  This information will help your tutor prepare for the session.
-                </p>
               </div>
             </div>
 
-            {/* Error in Modal */}
             {error && (
               <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
                 <p className="text-sm text-red-700">{error}</p>
@@ -427,10 +488,6 @@ const BookClass: React.FC = () => {
                 )}
               </button>
             </div>
-
-            <p className="text-xs text-gray-500 mt-4 text-center">
-              By booking, you agree to complete payment to confirm your session.
-            </p>
           </div>
         </div>
       )}

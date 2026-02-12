@@ -8,6 +8,9 @@ const API = `${BACKEND_URL}/api`;
 const api = axios.create({
   baseURL: API,
   timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
 });
 
 // Request interceptor to add token to every request
@@ -27,21 +30,27 @@ api.interceptors.request.use(
   }
 );
 
-// Response interceptor to handle 401 errors
+// Response interceptor to handle errors
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    console.log(`✅ Response from ${response.config.url}:`, response.data);
+    return response;
+  },
   (error) => {
     console.error('❌ API Error:', {
       status: error.response?.status,
       url: error.config?.url,
-      message: error.message
+      message: error.message,
+      data: error.response?.data
     });
     
     if (error.response?.status === 401) {
       console.log('🔐 401 Unauthorized - Redirecting to login');
       localStorage.removeItem('token');
+      localStorage.removeItem('user');
       window.location.href = '/login';
     }
+    
     return Promise.reject(error);
   }
 );

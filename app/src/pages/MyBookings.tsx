@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom'; // ✅ Import useNavigate
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/axiosConfig';
 import Navigation from '../components/Navigation';
@@ -40,10 +41,15 @@ interface Booking {
   amount: number;
   student_notes?: string;
   session?: Session;
+  payment?: {
+    id: string;
+    status: PaymentStatus;
+  };
 }
 
 const MyBookings: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate(); // ✅ Initialize navigate
 
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -63,6 +69,8 @@ const MyBookings: React.FC = () => {
       setSuccess(null);
       
       console.log('📋 Fetching user bookings...');
+      
+      // ✅ API returns Booking[] array directly
       const response = await api.get<Booking[]>('/bookings/my-bookings');
       
       console.log(`✅ Found ${response.data.length} bookings`);
@@ -116,7 +124,7 @@ const MyBookings: React.FC = () => {
       setSuccess('Booking deleted permanently!');
       console.log('✅ Booking deleted:', response.data);
       
-      // Remove from local state immediately for better UX
+      // Remove from local state immediately
       setBookings(prev => prev.filter(booking => booking.id !== bookingId));
       
       // Refresh after 2 seconds to get updated counts
@@ -130,6 +138,17 @@ const MyBookings: React.FC = () => {
     } finally {
       setDeleting(null);
     }
+  };
+
+  // ✅ NEW: Handle payment navigation with React Router
+  const handlePaymentClick = (bookingId: string) => {
+    console.log(`💰 Navigating to payment page for booking: ${bookingId}`);
+    navigate(`/payment/${bookingId}`);
+  };
+
+  // ✅ NEW: Handle book more classes navigation
+  const handleBookMoreClick = () => {
+    navigate('/book');
   };
 
   const getStatusBadge = (status: BookingStatus) => {
@@ -301,12 +320,12 @@ const MyBookings: React.FC = () => {
             <Calendar className="h-16 w-16 text-gray-300 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-gray-900 mb-2">No Bookings Yet</h3>
             <p className="text-gray-600 mb-6">Start your learning journey by booking your first class!</p>
-            <a
-              href="/book"
+            <button
+              onClick={handleBookMoreClick}
               className="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition font-semibold"
             >
               Book Your First Class
-            </a>
+            </button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -368,12 +387,13 @@ const MyBookings: React.FC = () => {
                   <div className="pt-5 border-t border-gray-200">
                     {booking.status !== 'cancelled' && booking.payment_status === 'pending' && (
                       <div className="space-y-3">
-                        <a
-                          href={`/payment/${booking.id}`}
+                        {/* ✅ FIXED: Use button with onClick instead of a tag */}
+                        <button
+                          onClick={() => handlePaymentClick(booking.id)}
                           className="block w-full bg-blue-600 text-white text-center py-3 rounded-lg hover:bg-blue-700 transition font-semibold"
                         >
                           Complete Payment Now
-                        </a>
+                        </button>
                         <button
                           onClick={() => handleCancelBooking(booking.id)}
                           disabled={cancelling === booking.id}
@@ -446,12 +466,13 @@ const MyBookings: React.FC = () => {
                       <div className="text-center p-3 bg-red-50 rounded-lg">
                         <p className="text-red-600 font-medium">Payment Failed</p>
                         <div className="space-y-2 mt-2">
-                          <a
-                            href={`/payment/${booking.id}`}
+                          {/* ✅ FIXED: Use button with onClick instead of a tag */}
+                          <button
+                            onClick={() => handlePaymentClick(booking.id)}
                             className="inline-block w-full bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition text-sm"
                           >
                             Retry Payment
-                          </a>
+                          </button>
                           <button
                             onClick={() => handleCancelBooking(booking.id)}
                             disabled={cancelling === booking.id}
@@ -466,6 +487,18 @@ const MyBookings: React.FC = () => {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+        
+        {/* ✅ ADDED: Book More Classes Button */}
+        {bookings.length > 0 && (
+          <div className="mt-8 text-center">
+            <button
+              onClick={handleBookMoreClick}
+              className="bg-blue-600 text-white px-8 py-3 rounded-lg hover:bg-blue-700 transition font-semibold"
+            >
+              + Book More Classes
+            </button>
           </div>
         )}
       </div>

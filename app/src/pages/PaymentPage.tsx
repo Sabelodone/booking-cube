@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import axios from 'axios';
+import api from '../utils/axiosConfig'; // ✅ Use centralized axios, not direct axios
 import { 
   ArrowLeft, 
   CreditCard, 
@@ -14,9 +14,6 @@ import {
   AlertCircle,
   Loader2
 } from 'lucide-react';
-
-const BACKEND_URL = 'http://localhost:8000';
-const API = `${BACKEND_URL}/api`;
 
 interface BookingData {
   id: string;
@@ -31,10 +28,16 @@ interface BookingData {
   };
 }
 
+interface PaymentInitiationResponse {
+  payment_id: string;
+  payment_url: string;
+  payment_data: Record<string, string>;
+}
+
 const PaymentPage = () => {
   const { bookingId } = useParams<{ bookingId: string }>();
   const navigate = useNavigate();
-  const { getAuthHeader, token } = useAuth();
+  const { token } = useAuth();
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [booking, setBooking] = useState<BookingData | null>(null);
@@ -51,46 +54,23 @@ const PaymentPage = () => {
 
   const fetchBookingDetails = async () => {
     try {
-      console.log('Fetching booking details for ID:', bookingId);
+      console.log('📋 Fetching booking details for ID:', bookingId);
       
-      // First, check if we have a token
+      // Check if we have a token
       if (!token) {
         setError('You need to be logged in to view this page');
         setLoading(false);
         return;
       }
 
-      const authHeader = getAuthHeader();
-      console.log('Auth header:', authHeader);
-
-      // Try to get the specific booking
-      try {
-        const response = await axios.get(
-          `${API}/bookings/${bookingId}`,
-          { headers: authHeader }
-        );
-        console.log('Booking data received:', response.data);
-        setBooking(response.data);
-      } catch (bookingError: any) {
-        console.log('Direct booking endpoint failed, trying my-bookings endpoint');
-        
-        // Fallback: Get all bookings and find the right one
-        const allBookingsResponse = await axios.get(
-          `${API}/bookings/my-bookings`,
-          { headers: authHeader }
-        );
-        
-        const bookingData = allBookingsResponse.data.find((b: any) => b.id === bookingId);
-        
-        if (!bookingData) {
-          setError('Booking not found. It may have been cancelled or does not exist.');
-          return;
-        }
-        
-        setBooking(bookingData);
-      }
+      // ✅ API returns BookingData object DIRECTLY, not wrapped
+      const response = await api.get<BookingData>(`/bookings/${bookingId}`);
+      
+      console.log('✅ Booking data received:', response.data);
+      setBooking(response.data);
+      
     } catch (error: any) {
-      console.error('Error fetching booking:', error);
+      console.error('❌ Error fetching booking:', error);
       
       if (error.response?.status === 401) {
         setError('Your session has expired. Please login again.');
@@ -111,25 +91,16 @@ const PaymentPage = () => {
     setError(null);
     
     try {
-      console.log('Initiating payment for booking:', bookingId);
+      console.log('💰 Initiating payment for booking:', bookingId);
       
-      const authHeader = getAuthHeader();
-      if (!authHeader.Authorization) {
-        setError('You need to be logged in to make a payment');
-        setProcessing(false);
-        return;
-      }
-
-      const response = await axios.post(
-        `${API}/payments/initiate/${bookingId}`,
+      // ✅ API returns PaymentInitiationResponse directly
+      const response = await api.post<PaymentInitiationResponse>(
+        `/payments/initiate/${bookingId}`,
         {},
-        { 
-          headers: authHeader,
-          timeout: 10000 // 10 second timeout
-        }
+        { timeout: 10000 }
       );
       
-      console.log('Payment initiation response:', response.data);
+      console.log('✅ Payment initiation response:', response.data);
       
       if (!response.data.payment_url || !response.data.payment_data) {
         throw new Error('Invalid payment response from server');
@@ -152,7 +123,7 @@ const PaymentPage = () => {
       document.body.appendChild(form);
       form.submit();
     } catch (error: any) {
-      console.error('Payment initiation error:', error);
+      console.error('❌ Payment initiation error:', error);
       
       if (error.code === 'ECONNABORTED') {
         setError('Payment request timed out. Please try again.');
@@ -176,7 +147,7 @@ const PaymentPage = () => {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+        <Loader2 className="h-12 w-12 text-blue-600 animate-spin" />
       </div>
     );
   }
@@ -349,15 +320,21 @@ const PaymentPage = () => {
                     <div className="flex items-center space-x-3 p-3 bg-purple-50 rounded-lg">
                       <Calendar className="h-6 w-6 text-purple-600" />
                       <div>
-                        <p className="text-sm text-gray-600">Date & Time</p>
-                        <p className="font-semibold text-gray-900">
-                          {booking.session.date} at {booking.session.start_time}
-                        </p>
+                        <p className="text-sm text-gray-600">Date</p>
+                        <p className="font-semibold text-gray-900">{booking.session.date}</p>
                       </div>
                     </div>
                     
                     <div className="flex items-center space-x-3 p-3 bg-green-50 rounded-lg">
                       <Clock className="h-6 w-6 text-green-600" />
+                      <div>
+                        <p className="text-sm text-gray-600">Time</p>
+                        <p className="font-semibold text-gray-900">{booking.session.start_time}</p>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center space-x-3 p-3 bg-yellow-50 rounded-lg">
+                      <Clock className="h-6 w-6 text-yellow-600" />
                       <div>
                         <p className="text-sm text-gray-600">Session Type</p>
                         <p className="font-semibold text-gray-900">
