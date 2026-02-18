@@ -1182,8 +1182,8 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
         msg['Reply-To'] = EMAIL_FROM
         msg['X-Priority'] = '1'
         
-        # Format price in Rands
-        amount_rands = booking_details['amount'] / 100
+        # Format price in Rands - SHOW FULL AMOUNT
+        amount_rands = booking_details['amount']  
         
         # Logo HTML
         logo_html = ""
@@ -1239,7 +1239,7 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
                             </tr>
                             <tr>
                                 <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Amount Paid:</td>
-                                <td style="color: {EMAIL_STYLES['success']}; font-size: 18px; font-weight: 700;">R{amount_rands:.2f}</td>
+                                <td style="color: {EMAIL_STYLES['success']}; font-size: 18px; font-weight: 700;">R{amount_rands}</td>
                             </tr>
                             {f'''
                             <tr>
@@ -1306,7 +1306,7 @@ Subject: {session_details['subject']}
 Date: {session_details['date']}
 Time: {session_details['start_time']}
 Type: {session_details['session_type'].replace('_', ' ').title()}
-Amount: R{amount_rands:.2f}
+Amount: R{amount_rands}
 {f'Notes: "{booking_details["student_notes"]}"' if booking_details.get('student_notes') else ''}
 ══════════════════════════════
 
@@ -1523,8 +1523,8 @@ async def send_booking_confirmation_whatsapp(user_phone: str, user_name: str, bo
         else:
             to_number = user_phone
         
-        # Format price in Rands
-        amount_rands = booking_details['amount'] / 100
+        # Format price in Rands - SHOW FULL AMOUNT
+        amount_rands = booking_details['amount']  # ← REMOVED /100
         
         # Generate class link
         class_link = f"{FRONTEND_URL}/class/{booking_details['id']}"
@@ -1543,7 +1543,7 @@ Subject: {session_details['subject']}
 📅 Date: {session_details['date']}
 ⏰ Time: {session_details['start_time']}
 👥 Type: {session_details['session_type'].replace('_', ' ').title()}
-💰 Amount: R{amount_rands:.2f}
+💰 Amount: R{amount_rands}  # ← REMOVED .2f
 {f'📝 Notes: "{booking_details["student_notes"]}"' if booking_details.get('student_notes') else ''}
 *═══════════════════*
 
@@ -1563,6 +1563,8 @@ View your bookings: {FRONTEND_URL}/my-bookings
 See you in class! 📖
 
 - CubeNotes Team"""
+        
+        # ... rest of the function remains the same
         
         # Send message
         message = client.messages.create(
