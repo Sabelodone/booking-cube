@@ -1083,7 +1083,7 @@ async def initiate_payment(
             logger.info(f"✅ Using existing payment: {payment_id}")
         
         # Prepare PayFast data
-        amount_in_rand = booking['amount'] / 100.0
+        amount_in_rand = booking['amount']
         
         # Split name properly
         name_parts = current_user.full_name.split() if current_user.full_name else []
@@ -1564,7 +1564,6 @@ See you in class! 📖
 
 - CubeNotes Team"""
         
-        # ... rest of the function remains the same
         
         # Send message
         message = client.messages.create(
