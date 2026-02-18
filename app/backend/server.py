@@ -437,22 +437,42 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 def generate_payfast_signature(data: dict, passphrase: str) -> str:
     """
     Generate PayFast signature EXACTLY as per PayFast specification.
-    This matches their PHP example 100%.
+    CRITICAL: Parameters must be in the EXACT order that PayFast expects!
     """
     try:
-        # Get all keys except signature
-        keys = [k for k in data.keys() if k != 'signature']
+        # Define the EXACT parameter order PayFast expects (from their documentation)
+        param_order = [
+            'merchant_id',
+            'merchant_key',
+            'return_url',
+            'cancel_url',
+            'notify_url',
+            'name_first',
+            'name_last',
+            'email_address',
+            'cell_number',
+            'm_payment_id',
+            'amount',
+            'item_name',
+            'item_description',
+            'custom_int1',
+            'custom_int2',
+            'custom_str1',
+            'custom_str2',
+            'email_confirmation',
+            'confirmation_address',
+            'payment_method'
+        ]
         
-        # CRITICAL: Sort the keys alphabetically
-        keys.sort()
-        
-        # Build parameter string exactly like PayFast PHP example
+        # Build string in EXACT order
         pf_param_string = ""
-        for key in keys:
-            if pf_param_string != "":
-                pf_param_string += "&"
-            # URL encode the value using quote_plus (spaces become +)
-            pf_param_string += f"{key}={urllib.parse.quote_plus(str(data[key]))}"
+        for key in param_order:
+            if key in data and data[key] is not None and str(data[key]).strip():
+                # URL encode the value using quote_plus (spaces become +)
+                encoded_value = urllib.parse.quote_plus(str(data[key]).strip())
+                if pf_param_string:
+                    pf_param_string += "&"
+                pf_param_string += f"{key}={encoded_value}"
         
         # Add passphrase if it exists
         if passphrase and passphrase.strip():
@@ -460,10 +480,13 @@ def generate_payfast_signature(data: dict, passphrase: str) -> str:
             pf_param_string += f"&passphrase={urllib.parse.quote_plus(clean_passphrase)}"
             logger.debug(f"✅ Passphrase added to signature string")
         
+        # DEBUG: Log the exact string being hashed
+        logger.info(f"🔐 Signature string: {pf_param_string}")
+        
         # Generate MD5 hash
         signature = hashlib.md5(pf_param_string.encode('utf-8')).hexdigest()
         
-        logger.debug(f"✅ Signature generated: {signature}")
+        logger.info(f"✅ Signature generated: {signature}")
         return signature
         
     except Exception as e:
