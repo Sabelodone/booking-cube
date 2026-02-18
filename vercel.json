@@ -1,8 +1,5 @@
-# Create the file with the configuration
-@"
 {
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
-"@ | Out-File -FilePath vercel.json -Encoding utf8
