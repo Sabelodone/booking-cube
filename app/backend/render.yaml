@@ -1,0 +1,72 @@
+# render.yaml
+services:
+  - type: web
+    name: tutoring-api
+    runtime: python
+    plan: free
+    region: frankfurt
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
+
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+
+      - key: MONGO_URL
+        sync: false
+
+      - key: DB_NAME
+        value: tutorhub
+
+      - key: JWT_SECRET_KEY
+        generateValue: true
+
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 1440
+
+      # PayFast
+      - key: PAYFAST_MERCHANT_ID
+        sync: false
+      - key: PAYFAST_MERCHANT_KEY
+        sync: false
+      - key: PAYFAST_PASSPHRASE
+        sync: false
+      - key: PAYFAST_URL
+        value: https://www.payfast.co.za/eng/process
+      - key: PAYFAST_RETURN_URL
+        sync: false
+      - key: PAYFAST_CANCEL_URL
+        sync: false
+      - key: PAYFAST_NOTIFY_URL
+        sync: false
+
+      # Email
+      - key: SMTP_SERVER
+        sync: false
+      - key: SMTP_PORT
+        value: 465
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_ENABLED
+        value: true
+
+      # Twilio
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        sync: false
+      - key: WHATSAPP_ENABLED
+        value: true
+
+      - key: FRONTEND_URL
+        sync: false
+
+      - key: CORS_ORIGINS
+        sync: false

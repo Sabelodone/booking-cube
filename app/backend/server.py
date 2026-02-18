@@ -24,6 +24,24 @@ from email.mime.multipart import MIMEMultipart
 import smtplib
 import traceback
 import re
+import base64
+from pathlib import Path
+
+# ==================== LOGO CONFIGURATION ====================
+# Path to logo
+LOGO_PATH = Path(__file__).parent / "assets" / "cube.png"
+
+# Read and encode logo as base64 for emails
+def get_logo_base64():
+    try:
+        with open(LOGO_PATH, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            return encoded_string
+    except Exception as e:
+        logger.error(f"❌ Failed to load logo: {e}")
+        return None
+
+LOGO_BASE64 = get_logo_base64()
 
 # ==================== CONFIGURE LOGGING FIRST ====================
 logging.basicConfig(
@@ -34,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
 # ==================== CONFIGURATION WITH VALIDATION ====================
 # MongoDB connection
 MONGO_URL = os.environ.get('MONGO_URL')
@@ -62,11 +81,11 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
-# ==================== PAYFAST CONFIGURATION - NO DEFAULTS! ====================
+# ==================== PAYFAST CONFIGURATION - LIVE MODE ====================
 PAYFAST_MERCHANT_ID = os.environ.get('PAYFAST_MERCHANT_ID')
 PAYFAST_MERCHANT_KEY = os.environ.get('PAYFAST_MERCHANT_KEY')
 PAYFAST_PASSPHRASE = os.environ.get('PAYFAST_PASSPHRASE')
-PAYFAST_URL = os.environ.get('PAYFAST_URL', 'https://sandbox.payfast.co.za/eng/process')
+PAYFAST_URL = os.environ.get('PAYFAST_URL', 'https://www.payfast.co.za/eng/process')  # LIVE URL
 PAYFAST_RETURN_URL = os.environ.get('PAYFAST_RETURN_URL', 'http://localhost:5173/payment-success')
 PAYFAST_CANCEL_URL = os.environ.get('PAYFAST_CANCEL_URL', 'http://localhost:5173/payment-failed')
 PAYFAST_NOTIFY_URL = os.environ.get('PAYFAST_NOTIFY_URL')
@@ -88,8 +107,12 @@ if not PAYFAST_NOTIFY_URL:
     logger.error("❌ PAYFAST_NOTIFY_URL not set in .env")
     raise ValueError("PAYFAST_NOTIFY_URL is required (use ngrok URL)")
 
-logger.info(f"✅ PayFast configured for Merchant ID: {PAYFAST_MERCHANT_ID}")
+# Clean passphrase of any whitespace
+PAYFAST_PASSPHRASE = PAYFAST_PASSPHRASE.strip()
+
+logger.info(f"✅ PayFast LIVE configured for Merchant ID: {PAYFAST_MERCHANT_ID}")
 logger.info(f"✅ PayFast Notify URL: {PAYFAST_NOTIFY_URL}")
+logger.info(f"✅ PayFast Passphrase length: {len(PAYFAST_PASSPHRASE)}")
 
 # Email Configuration
 SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
@@ -112,6 +135,60 @@ FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 CORS_ORIGINS_STR = os.environ.get('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000')
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',') if origin.strip()]
 logger.info(f"✅ CORS origins configured: {CORS_ORIGINS}")
+
+# ==================== EMAIL STYLES & TEMPLATE (MOVED TO TOP) ====================
+EMAIL_STYLES = {
+    'primary': '#4F46E5',
+    'primary_gradient': 'linear-gradient(135deg, #4F46E5, #7C3AED)',
+    'secondary': '#10B981',
+    'success': '#10B981',
+    'warning': '#F59E0B',
+    'danger': '#EF4444',
+    'dark': '#1F2937',
+    'light': '#F9FAFB',
+    'border': '#E5E7EB',
+    'text': '#374151',
+    'text_light': '#6B7280',
+    'background': '#F3F4F6',
+    'whatsapp': '#25D366',
+    'whatsapp_bg': '#DCF8C6',
+    'whatsapp_text': '#075E54'
+}
+
+def get_email_template(content_html: str, logo_html: str = "") -> str:
+    """Get the base email template with content"""
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>CubeNotes</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: {EMAIL_STYLES['background']};">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: {EMAIL_STYLES['background']};">
+        <tr>
+            <td align="center" style="padding: 40px 20px;">
+                <table width="600" cellpadding="0" cellspacing="0" border="0" style="max-width: 600px; width: 100%; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); overflow: hidden;">
+                    {logo_html}
+                    <tr>
+                        <td style="padding: 40px;">
+                            {content_html}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 20px 40px; background-color: #f9f9f9; border-top: 1px solid {EMAIL_STYLES['border']}; text-align: center;">
+                            <p style="margin: 0; color: {EMAIL_STYLES['text_light']}; font-size: 12px;">
+                                © {datetime.now().year} CubeNotes. All rights reserved.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>"""
+
 # ==================== CREATE APP FIRST ====================
 app = FastAPI(
     title="Tutoring Booking API",
@@ -356,16 +433,42 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             detail="Database error"
         )
 
-# ==================== PAYFAST HELPERS ====================
+# ==================== PAYFAST HELPERS - PAYFAST EXACT SPEC ====================
 def generate_payfast_signature(data: dict, passphrase: str) -> str:
+    """
+    Generate PayFast signature EXACTLY as per PayFast specification.
+    This matches their PHP example 100%.
+    """
     try:
-        sorted_keys = sorted([k for k in data.keys() if k != 'signature'])
-        param_string = '&'.join([f"{k}={urllib.parse.quote_plus(str(data[k]))}" for k in sorted_keys])
-        if passphrase:
-            param_string += f"&passphrase={urllib.parse.quote_plus(passphrase)}"
-        return hashlib.md5(param_string.encode('utf-8')).hexdigest()
+        # Get all keys except signature
+        keys = [k for k in data.keys() if k != 'signature']
+        
+        # CRITICAL: Sort the keys alphabetically
+        keys.sort()
+        
+        # Build parameter string exactly like PayFast PHP example
+        pf_param_string = ""
+        for key in keys:
+            if pf_param_string != "":
+                pf_param_string += "&"
+            # URL encode the value using quote_plus (spaces become +)
+            pf_param_string += f"{key}={urllib.parse.quote_plus(str(data[key]))}"
+        
+        # Add passphrase if it exists
+        if passphrase and passphrase.strip():
+            clean_passphrase = passphrase.strip()
+            pf_param_string += f"&passphrase={urllib.parse.quote_plus(clean_passphrase)}"
+            logger.debug(f"✅ Passphrase added to signature string")
+        
+        # Generate MD5 hash
+        signature = hashlib.md5(pf_param_string.encode('utf-8')).hexdigest()
+        
+        logger.debug(f"✅ Signature generated: {signature}")
+        return signature
+        
     except Exception as e:
-        logger.error(f"Error generating PayFast signature: {e}")
+        logger.error(f"❌ Error generating PayFast signature: {e}")
+        logger.error(traceback.format_exc())
         return ""
 
 # ==================== AUTH ROUTES ====================
@@ -608,22 +711,40 @@ async def create_booking(
         await db.payments.insert_one(payment)
         logger.info(f"✅ Payment record created: {payment_id}")
         
-        # ===== RETURN BOOKING WITH PAYMENT INFO AND REDIRECT FLAG =====
-        return {
+        # ===== FIXED: Create a clean response dictionary =====
+        response_data = {
             "success": True,
             "message": "Booking created successfully",
             "booking_id": booking_id,
             "booking": {
-                **booking,
-                "session": session
+                "id": booking['id'],
+                "user_id": booking['user_id'],
+                "session_id": booking['session_id'],
+                "status": booking['status'],
+                "payment_status": booking['payment_status'],
+                "amount": booking['amount'],
+                "student_notes": booking['student_notes'],
+                "created_at": booking['created_at'].isoformat() if isinstance(booking['created_at'], datetime) else booking['created_at'],
+                "updated_at": booking['updated_at'].isoformat() if isinstance(booking['updated_at'], datetime) else booking['updated_at'],
+                "session": {
+                    "id": session['id'],
+                    "subject": session['subject'],
+                    "session_type": session['session_type'],
+                    "date": session['date'],
+                    "start_time": session['start_time'],
+                    "duration_minutes": session['duration_minutes'],
+                    "price": session['price']
+                }
             },
             "payment": {
                 "payment_id": payment_id,
                 "status": "pending"
             },
-            "redirect_to_payment": True,  # 🔥 CRITICAL: Frontend must redirect
-            "redirect_url": f"/payment/{booking_id}"  # 🔥 Direct URL for redirect
+            "redirect_to_payment": True,
+            "redirect_url": f"/payment/{booking_id}"
         }
+        
+        return response_data
         
     except HTTPException:
         raise
@@ -874,7 +995,7 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
             detail="Database error"
         )
 
-# ==================== PAYMENT ROUTES ====================
+# ==================== PAYMENT ROUTES - LIVE VERSION ====================
 @api_router.post("/payments/initiate/{booking_id}")
 async def initiate_payment(
     booking_id: str,
@@ -941,28 +1062,61 @@ async def initiate_payment(
         # Prepare PayFast data
         amount_in_rand = booking['amount'] / 100.0
         
+        # Split name properly
+        name_parts = current_user.full_name.split() if current_user.full_name else []
+        name_first = name_parts[0] if name_parts else ''
+        name_last = name_parts[-1] if len(name_parts) > 1 else ''
+        
         data = {
-            'merchant_id': PAYFAST_MERCHANT_ID,
-            'merchant_key': PAYFAST_MERCHANT_KEY,
-            'return_url': PAYFAST_RETURN_URL,
-            'cancel_url': PAYFAST_CANCEL_URL,
-            'notify_url': PAYFAST_NOTIFY_URL,
-            'name_first': current_user.full_name.split()[0] if current_user.full_name else '',
-            'name_last': current_user.full_name.split()[-1] if len(current_user.full_name.split()) > 1 else '',
-            'email_address': current_user.email,
-            'm_payment_id': payment_id,
+            'merchant_id': str(PAYFAST_MERCHANT_ID),
+            'merchant_key': str(PAYFAST_MERCHANT_KEY),
+            'return_url': str(PAYFAST_RETURN_URL),
+            'cancel_url': str(PAYFAST_CANCEL_URL),
+            'notify_url': str(PAYFAST_NOTIFY_URL),
+            'name_first': str(name_first),
+            'name_last': str(name_last),
+            'email_address': str(current_user.email),
+            'm_payment_id': str(payment_id),
             'amount': f"{amount_in_rand:.2f}",
-            'item_name': f"{session['subject']} - {session['session_type'].replace('_', ' ').title()}",
-            'item_description': f"{session['date']} at {session['start_time']}",
-            'custom_str1': booking_id,
-            'custom_str2': current_user.id,
+            'item_name': str(f"{session['subject']} - {session['session_type'].replace('_', ' ').title()}"),
+            'item_description': str(f"{session['date']} at {session['start_time']}"),
+            'custom_str1': str(booking_id),
+            'custom_str2': str(current_user.id),
         }
         
-        signature = generate_payfast_signature(data, PAYFAST_PASSPHRASE)
+        # Clean the passphrase - remove any whitespace
+        clean_passphrase = PAYFAST_PASSPHRASE.strip() if PAYFAST_PASSPHRASE else ''
+        
+        # DEBUG: Log exactly what we're using
+        logger.info("=" * 80)
+        logger.info("🔍 PAYFAST LIVE DEBUG - SIGNATURE GENERATION:")
+        logger.info(f"📧 MERCHANT_ID: '{PAYFAST_MERCHANT_ID}'")
+        logger.info(f"🔑 MERCHANT_KEY: '{PAYFAST_MERCHANT_KEY}'")
+        logger.info(f"🔐 PASSPHRASE: '{clean_passphrase}' (length: {len(clean_passphrase)})")
+        logger.info(f"🌐 NOTIFY_URL: '{PAYFAST_NOTIFY_URL}'")
+        logger.info(f"🌐 PAYFAST_URL: '{PAYFAST_URL}'")
+        logger.info("=" * 80)
+        
+        # Generate signature with CLEAN passphrase
+        signature = generate_payfast_signature(data, clean_passphrase)
+        
         if signature:
             data['signature'] = signature
+            logger.info(f"✅ LIVE Signature generated successfully: {signature}")
+            
+            # Log the sorted parameters that went into signature
+            logger.info("📋 Sorted parameters for signature:")
+            sorted_keys = sorted([k for k in data.keys() if k != 'signature'])
+            for key in sorted_keys:
+                logger.info(f"   {key}: {data[key]}")
+        else:
+            logger.error(f"❌ Failed to generate signature!")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate payment signature"
+            )
         
-        logger.info(f"✅ PayFast data prepared for payment: {payment_id}")
+        logger.info(f"✅ PayFast LIVE data prepared for payment: {payment_id}")
         
         return {
             "payment_id": payment_id,
@@ -983,9 +1137,426 @@ async def initiate_payment(
         logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Payment initialization failed"
+            detail=f"Payment initialization failed: {str(e)}"
         )
 
+# ==================== NOTIFICATION HELPER FUNCTIONS ====================
+async def send_booking_confirmation_email(user_email: str, user_name: str, booking_details: dict, session_details: dict):
+    """Send beautifully styled booking confirmation email"""
+    try:
+        if not EMAIL_ENABLED:
+            logger.warning(f"⚠️ Email is disabled. Would send confirmation to: {user_email}")
+            return True
+        
+        logger.info(f"📧 Attempting to send booking confirmation to: {user_email}")
+        logger.info(f"📧 SMTP Config - Server: {SMTP_SERVER}, Port: {SMTP_PORT}, User: {SMTP_USERNAME}")
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "✅ Booking Confirmed! 🎓 Your Session is Ready - CubeNotes"
+        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
+        msg['To'] = user_email
+        msg['Reply-To'] = EMAIL_FROM
+        msg['X-Priority'] = '1'
+        
+        # Format price in Rands
+        amount_rands = booking_details['amount'] / 100
+        
+        # Logo HTML
+        logo_html = ""
+        if LOGO_BASE64:
+            logo_html = f'''
+            <tr>
+                <td align="center" style="padding: 40px 40px 20px 40px;">
+                    <img src="data:image/png;base64,{LOGO_BASE64}" alt="CubeNotes" width="120" height="120" style="display: inline-block; border-radius: 60px; box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2);">
+                    <h1 style="margin: 20px 0 0 0; color: {EMAIL_STYLES['primary']}; font-size: 32px; font-weight: 800; letter-spacing: -0.5px;">CubeNotes</h1>
+                    <p style="margin: 5px 0 0 0; color: {EMAIL_STYLES['text_light']}; font-size: 16px;">Learning Platform</p>
+                </td>
+            </tr>
+            '''
+        
+        # Create content HTML
+        content_html = f"""
+            <h2 style="margin: 0 0 20px 0; color: {EMAIL_STYLES['text']}; font-size: 28px; font-weight: 700; text-align: center;">
+                Booking Confirmed! 🎉
+            </h2>
+            
+            <p style="margin: 0 0 20px 0; color: {EMAIL_STYLES['text']}; font-size: 16px; line-height: 1.6;">
+                Hello <strong style="color: {EMAIL_STYLES['primary']};">{user_name}</strong>,
+            </p>
+            
+            <p style="margin: 0 0 30px 0; color: {EMAIL_STYLES['text']}; font-size: 16px; line-height: 1.6;">
+                Great news! Your tutoring session has been successfully confirmed. Get ready for an amazing learning experience! 🚀
+            </p>
+            
+            <!-- Session Details Card -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0; background: linear-gradient(135deg, #f9fafb, #f3f4f6); border-radius: 20px;">
+                <tr>
+                    <td style="padding: 30px;">
+                        <h3 style="margin: 0 0 20px 0; color: {EMAIL_STYLES['primary']}; font-size: 20px; font-weight: 700; text-align: center;">
+                            📚 Session Details
+                        </h3>
+                        
+                        <table width="100%" cellpadding="10" cellspacing="0" border="0">
+                            <tr>
+                                <td width="40%" style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Subject:</td>
+                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['subject']}</td>
+                            </tr>
+                            <tr>
+                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Date:</td>
+                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['date']}</td>
+                            </tr>
+                            <tr>
+                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Time:</td>
+                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['start_time']} (90 minutes)</td>
+                            </tr>
+                            <tr>
+                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Session Type:</td>
+                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['session_type'].replace('_', ' ').title()}</td>
+                            </tr>
+                            <tr>
+                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Amount Paid:</td>
+                                <td style="color: {EMAIL_STYLES['success']}; font-size: 18px; font-weight: 700;">R{amount_rands:.2f}</td>
+                            </tr>
+                            {f'''
+                            <tr>
+                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Your Notes:</td>
+                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-style: italic;">"{booking_details['student_notes']}"</td>
+                            </tr>
+                            ''' if booking_details.get('student_notes') else ''}
+                        </table>
+                    </td>
+                </tr>
+            </table>
+            
+            <!-- WhatsApp Link Card -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0; background-color: {EMAIL_STYLES['whatsapp_bg']}; border: 2px solid {EMAIL_STYLES['whatsapp']}; border-radius: 20px;">
+                <tr>
+                    <td style="padding: 30px; text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">📱</div>
+                        <h3 style="margin: 0 0 15px 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 22px; font-weight: 700;">
+                            Your Class Link Will Be Sent via WhatsApp
+                        </h3>
+                        <p style="margin: 0 0 10px 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 16px;">
+                            We'll send the meeting link to your WhatsApp number:
+                        </p>
+                        <p style="margin: 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 20px; font-weight: 700; background-color: #ffffff; padding: 12px 20px; border-radius: 50px; display: inline-block;">
+                            {booking_details.get('user_phone', 'Your registered number')}
+                        </p>
+                        <p style="margin: 20px 0 0 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 14px;">
+                            ⏰ Link will be sent 1 hour before the session
+                        </p>
+                    </td>
+                </tr>
+            </table>
+            
+            <!-- Action Button -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0;">
+                <tr>
+                    <td align="center">
+                        <a href="{FRONTEND_URL}/my-bookings" style="display: inline-block; padding: 16px 40px; background: {EMAIL_STYLES['primary_gradient']}; color: #ffffff; text-decoration: none; font-weight: 700; font-size: 16px; border-radius: 50px; box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);">
+                            View My Bookings Dashboard
+                        </a>
+                    </td>
+                </tr>
+            </table>
+            
+            <hr style="margin: 30px 0; border: none; border-top: 2px solid {EMAIL_STYLES['border']};">
+            
+            <p style="margin: 0 0 10px 0; color: {EMAIL_STYLES['text_light']}; font-size: 14px; text-align: center;">
+                <strong>Need to reschedule or have questions?</strong><br>
+                Contact us anytime - we're here to help!
+            </p>
+        """
+        
+        # Plain text version
+        text = f"""✅ BOOKING CONFIRMED - CubeNotes
+
+Hello {user_name},
+
+GREAT NEWS! Your tutoring session has been CONFIRMED! 🎉
+
+══════════════════════════════
+📚 SESSION DETAILS
+══════════════════════════════
+Subject: {session_details['subject']}
+Date: {session_details['date']}
+Time: {session_details['start_time']}
+Type: {session_details['session_type'].replace('_', ' ').title()}
+Amount: R{amount_rands:.2f}
+{f'Notes: "{booking_details["student_notes"]}"' if booking_details.get('student_notes') else ''}
+══════════════════════════════
+
+📱 Your class link will be sent via WhatsApp to: {booking_details.get('user_phone', 'Your registered number')}
+
+View your bookings: {FRONTEND_URL}/my-bookings
+
+Need help?
+📧 Email: info@techartistrydesigns.com
+📱 WhatsApp: 0746422396
+
+Best regards,
+CubeNotes Team"""
+        
+        # Attach content to template
+        full_html = get_email_template(content_html, logo_html)
+        
+        # Clear any existing content and attach
+        msg.set_charset('utf-8')
+        msg.attach(MIMEText(text, 'plain', 'utf-8'))
+        msg.attach(MIMEText(full_html, 'html', 'utf-8'))
+        
+        # Send email
+        logger.info(f"📧 Connecting to SMTP server {SMTP_SERVER}:{SMTP_PORT}...")
+        
+        # Use SMTP_SSL for port 465 or starttls for 587
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+            server.starttls()
+            
+        logger.info(f"📧 Logging in as {SMTP_USERNAME}...")
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        
+        logger.info(f"📧 Sending message to {user_email}...")
+        server.send_message(msg)
+        server.quit()
+        
+        logger.info(f"✅ Booking confirmation email sent to: {user_email}")
+        return True
+        
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"❌ SMTP Authentication Error: {e}")
+        logger.error("Check your email username and password")
+        return False
+    except smtplib.SMTPException as e:
+        logger.error(f"❌ SMTP Error: {e}")
+        logger.error(traceback.format_exc())
+        return False
+    except Exception as e:
+        logger.error(f"❌ Failed to send booking confirmation email: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+async def send_password_reset_email(email: str, reset_token: str, full_name: str):
+    """Send beautifully styled password reset email"""
+    try:
+        if not EMAIL_ENABLED:
+            logger.warning(f"⚠️ Email is disabled. Would send reset email to: {email}")
+            logger.warning(f"Reset link: {FRONTEND_URL}/reset-password?token={reset_token}")
+            return True
+        
+        reset_link = f"{FRONTEND_URL}/reset-password?token={reset_token}"
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "🔐 Reset Your Password - CubeNotes"
+        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
+        msg['To'] = email
+        msg['Reply-To'] = EMAIL_FROM
+        msg['X-Priority'] = '1'
+        
+        # Logo HTML
+        logo_html = ""
+        if LOGO_BASE64:
+            logo_html = f'''
+            <tr>
+                <td align="center" style="padding: 40px 40px 20px 40px;">
+                    <img src="data:image/png;base64,{LOGO_BASE64}" alt="CubeNotes" width="100" height="100" style="display: inline-block; border-radius: 50px; box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2);">
+                </td>
+            </tr>
+            '''
+        
+        # Create content HTML
+        content_html = f"""
+            <h2 style="margin: 0 0 10px 0; color: {EMAIL_STYLES['text']}; font-size: 28px; font-weight: 700; text-align: center;">
+                Password Reset Request
+            </h2>
+            
+            <p style="margin: 0 0 30px 0; color: {EMAIL_STYLES['text_light']}; font-size: 16px; text-align: center;">
+                We received a request to reset your password
+            </p>
+            
+            <p style="margin: 0 0 20px 0; color: {EMAIL_STYLES['text']}; font-size: 16px; line-height: 1.6;">
+                Hello <strong style="color: {EMAIL_STYLES['primary']};">{full_name}</strong>,
+            </p>
+            
+            <p style="margin: 0 0 30px 0; color: {EMAIL_STYLES['text']}; font-size: 16px; line-height: 1.6;">
+                We received a request to reset the password for your CubeNotes account. 
+                Click the button below to create a new password. This link will expire in 
+                <strong style="color: {EMAIL_STYLES['danger']};">1 hour</strong> for security reasons.
+            </p>
+            
+            <!-- Security Notice -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 20px 0; background-color: #FEF2F2; border-left: 4px solid {EMAIL_STYLES['danger']}; border-radius: 8px;">
+                <tr>
+                    <td style="padding: 20px;">
+                        <p style="margin: 0; color: {EMAIL_STYLES['danger']}; font-size: 14px; line-height: 1.5;">
+                            <strong>⚠️ Didn't request this?</strong><br>
+                            If you didn't request a password reset, please ignore this email 
+                            or contact support if you're concerned about your account security.
+                        </p>
+                    </td>
+                </tr>
+            </table>
+            
+            <!-- Reset Button -->
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0;">
+                <tr>
+                    <td align="center">
+                        <a href="{reset_link}" style="display: inline-block; padding: 16px 40px; background: {EMAIL_STYLES['primary_gradient']}; color: #ffffff; text-decoration: none; font-weight: 700; font-size: 16px; border-radius: 50px; box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);">
+                            Reset Password
+                        </a>
+                    </td>
+                </tr>
+            </table>
+            
+            <!-- Alternative Link -->
+            <p style="margin: 20px 0 10px 0; color: {EMAIL_STYLES['text_light']}; font-size: 14px; text-align: center;">
+                Or copy this link to your browser:
+            </p>
+            <p style="margin: 0 0 30px 0; padding: 15px; background-color: {EMAIL_STYLES['light']}; border-radius: 8px; font-family: monospace; font-size: 14px; word-break: break-all; color: {EMAIL_STYLES['text']}; text-align: center;">
+                {reset_link}
+            </p>
+            
+            <hr style="margin: 30px 0; border: none; border-top: 2px solid {EMAIL_STYLES['border']};">
+            
+            <p style="margin: 0 0 5px 0; color: {EMAIL_STYLES['text_light']}; font-size: 14px; text-align: center;">
+                Need help? Contact our support team:
+            </p>
+            <p style="margin: 0; color: {EMAIL_STYLES['text']}; font-size: 14px; text-align: center;">
+                📧 info@techartistrydesigns.com | 📱 074 642 2396
+            </p>
+        """
+        
+        # Plain text version
+        text = f"""🔐 PASSWORD RESET REQUEST - CubeNotes
+
+Hello {full_name},
+
+We received a request to reset your password for your CubeNotes account.
+
+Click the link below to reset your password:
+{reset_link}
+
+This link will expire in 1 hour for security reasons.
+
+⚠️ If you didn't request this, please ignore this email - your password will remain unchanged.
+
+Need help?
+📧 Email: info@techartistrydesigns.com
+📱 WhatsApp: 0746422396
+
+Best regards,
+CubeNotes Team"""
+        
+        # Attach content to template
+        full_html = get_email_template(content_html, logo_html)
+        
+        # Clear any existing content and attach
+        msg.set_charset('utf-8')
+        msg.attach(MIMEText(text, 'plain', 'utf-8'))
+        msg.attach(MIMEText(full_html, 'html', 'utf-8'))
+        
+        # Send email
+        logger.info(f"📧 Sending password reset email to: {email}")
+        
+        # Use SMTP_SSL for port 465 or starttls for 587
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+            server.starttls()
+            
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        
+        logger.info(f"✅ Password reset email sent successfully to: {email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send password reset email: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+async def send_booking_confirmation_whatsapp(user_phone: str, user_name: str, booking_details: dict, session_details: dict):
+    """Send booking confirmation via WhatsApp with class link"""
+    try:
+        if not WHATSAPP_ENABLED:
+            logger.warning(f"⚠️ WhatsApp is disabled. Would send confirmation to: {user_phone}")
+            return True
+        
+        # Import twilio here to avoid dependency if not used
+        from twilio.rest import Client
+        
+        # Initialize Twilio client
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        
+        # Format phone number
+        if not user_phone.startswith('whatsapp:'):
+            to_number = f"whatsapp:{user_phone}"
+        else:
+            to_number = user_phone
+        
+        # Format price in Rands
+        amount_rands = booking_details['amount'] / 100
+        
+        # Generate class link
+        class_link = f"{FRONTEND_URL}/class/{booking_details['id']}"
+        
+        # Create WhatsApp message with beautiful formatting
+        message_body = f"""🎓 *CUBENOTES* - Booking Confirmed! ✅
+
+Hello {user_name}! ✨
+
+Your tutoring session has been CONFIRMED!
+
+*═══════════════════*
+📚 *SESSION DETAILS*
+*═══════════════════*
+Subject: {session_details['subject']}
+📅 Date: {session_details['date']}
+⏰ Time: {session_details['start_time']}
+👥 Type: {session_details['session_type'].replace('_', ' ').title()}
+💰 Amount: R{amount_rands:.2f}
+{f'📝 Notes: "{booking_details["student_notes"]}"' if booking_details.get('student_notes') else ''}
+*═══════════════════*
+
+🔗 *YOUR CLASS LINK:*
+{class_link}
+
+⏰ *Link will be activated 1 hour before session*
+
+*═══════════════════*
+📞 *Need Help?*
+• Email: info@techartistrydesigns.com
+• WhatsApp: 0746422396
+*═══════════════════*
+
+View your bookings: {FRONTEND_URL}/my-bookings
+
+See you in class! 📖
+
+- CubeNotes Team"""
+        
+        # Send message
+        message = client.messages.create(
+            body=message_body,
+            from_=TWILIO_WHATSAPP_FROM,
+            to=to_number
+        )
+        
+        logger.info(f"✅ WhatsApp confirmation sent to {user_phone}: {message.sid}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send WhatsApp confirmation: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+# ==================== PAYMENT ROUTES - UPDATED ITN WITH NOTIFICATIONS ====================
 @api_router.post("/payments/itn")
 async def payfast_itn(
     background_tasks: BackgroundTasks,
@@ -1045,6 +1616,53 @@ async def payfast_itn(
                 }
             )
             logger.info(f"✅ Booking confirmed: {custom_str1}")
+            
+            # ===== FETCH BOOKING AND USER DETAILS FOR NOTIFICATIONS =====
+            # Get booking details
+            booking = await db.bookings.find_one(
+                {"id": custom_str1},
+                {"_id": 0}
+            )
+            
+            if booking:
+                # Get session details
+                session = await db.sessions.find_one(
+                    {"id": booking['session_id']},
+                    {"_id": 0}
+                )
+                
+                # Get user details
+                user = await db.users.find_one(
+                    {"id": booking['user_id']},
+                    {"_id": 0}
+                )
+                
+                if user and session:
+                    # Add user phone to booking details for WhatsApp
+                    booking_with_phone = booking.copy()
+                    booking_with_phone['user_phone'] = user.get('phone', '')
+                    
+                    # Send email notification (in background)
+                    if EMAIL_ENABLED:
+                        background_tasks.add_task(
+                            send_booking_confirmation_email,
+                            user['email'],
+                            user['full_name'],
+                            booking_with_phone,
+                            session
+                        )
+                        logger.info(f"📧 Email notification queued for: {user['email']}")
+                    
+                    # Send WhatsApp notification (in background)
+                    if WHATSAPP_ENABLED and user.get('phone'):
+                        background_tasks.add_task(
+                            send_booking_confirmation_whatsapp,
+                            user['phone'],
+                            user['full_name'],
+                            booking_with_phone,
+                            session
+                        )
+                        logger.info(f"📱 WhatsApp notification queued for: {user['phone']}")
             
         elif payment_status == "FAILED":
             await db.payments.update_one(
@@ -1151,6 +1769,269 @@ async def get_payment_for_booking(
             detail="Database error"
         )
 
+# ==================== PASSWORD RESET TOKENS COLLECTION ====================
+password_reset_tokens = db.password_reset_tokens
+
+# ==================== PASSWORD RESET ROUTES ====================
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+@api_router.post("/auth/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest):
+    """
+    Request a password reset email
+    """
+    try:
+        logger.info(f"📧 Password reset requested for: {request.email}")
+        
+        # Find user
+        user = await db.users.find_one({"email": request.email}, {"_id": 0})
+        
+        # Always return success even if user doesn't exist (security best practice)
+        if not user:
+            logger.info(f"⚠️ Password reset requested for non-existent email: {request.email}")
+            return {
+                "success": True,
+                "message": "If an account exists with this email, you will receive reset instructions."
+            }
+        
+        # Generate reset token (valid for 1 hour)
+        token_data = {
+            "sub": user['id'],
+            "email": user['email'],
+            "type": "password_reset",
+            "exp": datetime.now(timezone.utc) + timedelta(hours=1)
+        }
+        reset_token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
+        
+        # Store token in database (optional, for additional validation)
+        await password_reset_tokens.insert_one({
+            "user_id": user['id'],
+            "token": reset_token,
+            "created_at": datetime.now(timezone.utc),
+            "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+            "used": False
+        })
+        
+        # Send email
+        email_sent = await send_password_reset_email(
+            email=user['email'],
+            reset_token=reset_token,
+            full_name=user.get('full_name', 'Student')
+        )
+        
+        if not email_sent and EMAIL_ENABLED:
+            logger.error(f"❌ Failed to send reset email to: {request.email}")
+            # Don't expose email failure to client
+            return {
+                "success": True,
+                "message": "If an account exists with this email, you will receive reset instructions."
+            }
+        
+        return {
+            "success": True,
+            "message": "If an account exists with this email, you will receive reset instructions."
+        }
+        
+    except PyMongoError as e:
+        logger.error(f"❌ Database error in forgot_password: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred. Please try again."
+        )
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in forgot_password: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred. Please try again."
+        )
+
+@api_router.post("/auth/reset-password")
+async def reset_password(request: ResetPasswordRequest):
+    """
+    Reset password using token
+    """
+    try:
+        logger.info("🔐 Password reset attempt with token")
+        
+        # Verify token
+        try:
+            payload = jwt.decode(request.token, SECRET_KEY, algorithms=[ALGORITHM])
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset token has expired. Please request a new one."
+            )
+        except jwt.InvalidTokenError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset token. Please request a new one."
+            )
+        
+        # Check token type
+        if payload.get('type') != 'password_reset':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid token type"
+            )
+        
+        user_id = payload.get('sub')
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid token payload"
+            )
+        
+        # Check if token exists in database and not used
+        token_record = await password_reset_tokens.find_one({
+            "token": request.token,
+            "used": False,
+            "expires_at": {"$gt": datetime.now(timezone.utc)}
+        })
+        
+        if not token_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired reset token"
+            )
+        
+        # Hash new password
+        hashed_password = hash_password(request.new_password)
+        
+        # Update user password
+        await db.users.update_one(
+            {"id": user_id},
+            {
+                "$set": {
+                    "hashed_password": hashed_password,
+                    "updated_at": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        # Mark token as used
+        await password_reset_tokens.update_one(
+            {"token": request.token},
+            {"$set": {"used": True, "used_at": datetime.now(timezone.utc)}}
+        )
+        
+        logger.info(f"✅ Password reset successful for user: {user_id}")
+        
+        return {
+            "success": True,
+            "message": "Password has been reset successfully. You can now login with your new password."
+        }
+        
+    except HTTPException:
+        raise
+    except PyMongoError as e:
+        logger.error(f"❌ Database error in reset_password: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred. Please try again."
+        )
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in reset_password: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred. Please try again."
+        )
+
+@api_router.get("/auth/verify-reset-token/{token}")
+async def verify_reset_token(token: str):
+    """
+    Verify if a reset token is valid
+    """
+    try:
+        # Check if token exists and not used
+        token_record = await password_reset_tokens.find_one({
+            "token": token,
+            "used": False,
+            "expires_at": {"$gt": datetime.now(timezone.utc)}
+        })
+        
+        if not token_record:
+            return {"valid": False}
+        
+        return {"valid": True}
+        
+    except Exception as e:
+        logger.error(f"Error verifying token: {e}")
+        return {"valid": False}
+
+# ==================== TEST NOTIFICATION ENDPOINT ====================
+@api_router.post("/test/send-notification")
+async def test_notification(
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user)
+):
+    """Test endpoint to send email and WhatsApp notifications"""
+    try:
+        # Get user's most recent booking
+        booking = await db.bookings.find_one(
+            {"user_id": current_user.id},
+            {"_id": 0},
+            sort=[("created_at", -1)]
+        )
+        
+        if not booking:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No bookings found"
+            )
+        
+        # Get session details
+        session = await db.sessions.find_one(
+            {"id": booking['session_id']},
+            {"_id": 0}
+        )
+        
+        # Add user phone to booking details
+        booking_with_phone = booking.copy()
+        booking_with_phone['user_phone'] = current_user.phone
+        
+        results = {"email": False, "whatsapp": False}
+        
+        # Test email
+        if EMAIL_ENABLED:
+            email_sent = await send_booking_confirmation_email(
+                current_user.email,
+                current_user.full_name,
+                booking_with_phone,
+                session
+            )
+            results["email"] = email_sent
+        
+        # Test WhatsApp
+        if WHATSAPP_ENABLED and current_user.phone:
+            whatsapp_sent = await send_booking_confirmation_whatsapp(
+                current_user.phone,
+                current_user.full_name,
+                booking_with_phone,
+                session
+            )
+            results["whatsapp"] = whatsapp_sent
+        
+        return {
+            "success": True,
+            "message": "Notifications sent",
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Test notification error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 # ==================== SEED DATA ====================
 @api_router.post("/seed-sessions")
 async def seed_sessions():
@@ -1168,8 +2049,8 @@ async def seed_sessions():
         # ============ SUNDAYS - GROUP CLASSES (10 SPOTS EACH) ============
         # Get next Sunday
         days_until_sunday = (6 - today.weekday()) % 7
-        if days_until_sunday == 0:  # Today is Sunday
-            days_until_sunday = 7   # Next Sunday
+        if days_until_sunday == 0:
+            days_until_sunday = 7
         next_sunday = today + timedelta(days=days_until_sunday)
         
         # Create 4 Sundays of group classes
@@ -1213,13 +2094,13 @@ async def seed_sessions():
         # ============ WEEKDAYS - 1-ON-1 SESSIONS (1 SPOT EACH) ============
         # Get next Monday
         days_until_monday = (0 - today.weekday()) % 7
-        if days_until_monday == 0:  # Today is Monday
-            days_until_monday = 7   # Next Monday
+        if days_until_monday == 0:
+            days_until_monday = 7
         next_monday = today + timedelta(days=days_until_monday)
         
         # Create 2 weeks of weekday 1-on-1 sessions
         for week in range(2):
-            for day in range(5):  # Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4
+            for day in range(5):
                 weekday = next_monday + timedelta(days=week * 7 + day)
                 date_str = weekday.strftime('%Y-%m-%d')
                 day_name = weekday.strftime('%A')
@@ -1270,49 +2151,16 @@ async def seed_sessions():
             one_on_one_spots = len(one_on_one_sessions)
             total_spots = group_spots + one_on_one_spots
             
-            # ============ PRINT SUMMARY ============
             logger.info("=" * 60)
             logger.info("✅✅✅ SESSIONS SEEDED SUCCESSFULLY ✅✅✅")
             logger.info("=" * 60)
             logger.info(f"📊 TOTAL SESSIONS: {len(sessions)}")
             logger.info(f"   ├─ SUNDAY Group Classes: {len(group_sessions)} sessions")
-            logger.info(f"   │  ├─ Each has 10 spots")
-            logger.info(f"   │  ├─ Subjects: Maths, Physical Sciences")
-            logger.info(f"   │  ├─ Times: 09:00, 11:00")
             logger.info(f"   │  └─ Total group spots: {group_spots}")
-            logger.info(f"   │")
             logger.info(f"   └─ WEEKDAY 1-on-1 Sessions: {len(one_on_one_sessions)} sessions")
-            logger.info(f"      ├─ Each has 1 spot")
-            logger.info(f"      ├─ Subjects: Maths, Physical Sciences")
-            logger.info(f"      ├─ Times: 14:00, 16:00, 18:00")
             logger.info(f"      └─ Total 1-on-1 spots: {one_on_one_spots}")
             logger.info("=" * 60)
             logger.info(f"🎫 TOTAL AVAILABLE SPOTS: {total_spots}")
-            logger.info("=" * 60)
-            
-            # ============ SHOW NEXT SUNDAY ============
-            next_sunday_str = next_sunday.strftime('%Y-%m-%d')
-            sunday_groups = [s for s in sessions if s['date'] == next_sunday_str and s['session_type'] == 'group']
-            
-            logger.info(f"\n📅 NEXT SUNDAY ({next_sunday.strftime('%A %d %B %Y')}):")
-            for s in sunday_groups:
-                logger.info(f"   • {s['subject']} @ {s['start_time']} - {s['max_students']} spots available")
-            
-            # ============ SHOW TOMORROW ============
-            tomorrow = (today + timedelta(days=1)).strftime('%Y-%m-%d')
-            tomorrow_sessions = [s for s in sessions if s['date'] == tomorrow and s['session_type'] == 'one_on_one']
-            
-            if tomorrow_sessions:
-                logger.info(f"\n📅 TOMORROW ({ (today + timedelta(days=1)).strftime('%A %d %B %Y') }):")
-                time_slots = {}
-                for s in tomorrow_sessions:
-                    if s['start_time'] not in time_slots:
-                        time_slots[s['start_time']] = []
-                    time_slots[s['start_time']].append(s['subject'])
-                
-                for time, subjects in time_slots.items():
-                    logger.info(f"   • {time}: {', '.join(subjects)} (1 spot each)")
-            
             logger.info("=" * 60)
         
         return {
@@ -1325,20 +2173,6 @@ async def seed_sessions():
                 "total_group_spots": group_spots,
                 "total_one_on_one_spots": one_on_one_spots,
                 "total_available_spots": total_spots
-            },
-            "schedule": {
-                "sundays": {
-                    "days": [next_sunday.strftime('%Y-%m-%d')],
-                    "times": ["09:00", "11:00"],
-                    "subjects": ["Maths", "Physical Sciences"],
-                    "spots_per_session": 10
-                },
-                "weekdays": {
-                    "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-                    "times": ["14:00", "16:00", "18:00"],
-                    "subjects": ["Maths", "Physical Sciences"],
-                    "spots_per_session": 1
-                }
             }
         }
         
@@ -1366,7 +2200,6 @@ async def create_test_user():
         existing = await db.users.find_one({"email": "test@example.com"})
         if existing:
             token = create_access_token({"sub": existing['id']})
-            # Remove _id for response
             if '_id' in existing:
                 del existing['_id']
             
@@ -1402,7 +2235,6 @@ async def create_test_user():
         await db.users.insert_one(user)
         logger.info(f"✅ New test user created: {user_id}")
         
-        # Create token
         token = create_access_token({"sub": user_id})
         
         return {
