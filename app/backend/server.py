@@ -1806,7 +1806,10 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 @api_router.post("/auth/forgot-password")
-async def forgot_password(request: ForgotPasswordRequest):
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks  # 👈 ADD THIS
+):
     """
     Request a password reset email
     """
@@ -1842,21 +1845,17 @@ async def forgot_password(request: ForgotPasswordRequest):
             "used": False
         })
         
-        # Send email
-        email_sent = await send_password_reset_email(
+        # 👇 SEND EMAIL IN BACKGROUND - THIS IS THE KEY FIX
+        background_tasks.add_task(
+            send_password_reset_email,
             email=user['email'],
             reset_token=reset_token,
             full_name=user.get('full_name', 'Student')
         )
         
-        if not email_sent and EMAIL_ENABLED:
-            logger.error(f"❌ Failed to send reset email to: {request.email}")
-            # Don't expose email failure to client
-            return {
-                "success": True,
-                "message": "If an account exists with this email, you will receive reset instructions."
-            }
+        logger.info(f"✅ Password reset email queued for: {request.email}")
         
+        # Return immediately without waiting for email to send
         return {
             "success": True,
             "message": "If an account exists with this email, you will receive reset instructions."
@@ -1864,18 +1863,19 @@ async def forgot_password(request: ForgotPasswordRequest):
         
     except PyMongoError as e:
         logger.error(f"❌ Database error in forgot_password: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred. Please try again."
-        )
+        # Still return success for security
+        return {
+            "success": True,
+            "message": "If an account exists with this email, you will receive reset instructions."
+        }
     except Exception as e:
         logger.error(f"❌ Unexpected error in forgot_password: {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred. Please try again."
-        )
-
+        # Still return success for security
+        return {
+            "success": True,
+            "message": "If an account exists with this email, you will receive reset instructions."
+        }
 @api_router.post("/auth/reset-password")
 async def reset_password(request: ResetPasswordRequest):
     """
