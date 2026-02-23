@@ -1808,13 +1808,14 @@ class ResetPasswordRequest(BaseModel):
 @api_router.post("/auth/forgot-password")
 async def forgot_password(
     request: ForgotPasswordRequest,
-    background_tasks: BackgroundTasks  # 👈 ADD THIS
+    background_tasks: BackgroundTasks
 ):
     """
     Request a password reset email
     """
     try:
         logger.info(f"📧 Password reset requested for: {request.email}")
+        logger.info(f"📧 EMAIL_ENABLED = {EMAIL_ENABLED}")
         
         # Find user
         user = await db.users.find_one({"email": request.email}, {"_id": 0})
@@ -1827,6 +1828,8 @@ async def forgot_password(
                 "message": "If an account exists with this email, you will receive reset instructions."
             }
         
+        logger.info(f"✅ User found: {user['id']} - {user.get('full_name', 'Unknown')}")
+        
         # Generate reset token (valid for 1 hour)
         token_data = {
             "sub": user['id'],
@@ -1836,26 +1839,38 @@ async def forgot_password(
         }
         reset_token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
         
-        # Store token in database (optional, for additional validation)
-        await password_reset_tokens.insert_one({
+        # Store token in database
+        token_doc = {
             "user_id": user['id'],
             "token": reset_token,
             "created_at": datetime.now(timezone.utc),
             "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
             "used": False
-        })
+        }
+        await password_reset_tokens.insert_one(token_doc)
+        logger.info(f"✅ Reset token stored in database")
         
-        # 👇 SEND EMAIL IN BACKGROUND - THIS IS THE KEY FIX
+        # Check if email is enabled
+        if not EMAIL_ENABLED:
+            logger.warning(f"⚠️ Email is disabled! Would send to: {user['email']}")
+            logger.warning(f"🔗 Reset link: {FRONTEND_URL}/reset-password?token={reset_token}")
+            return {
+                "success": True,
+                "message": "If an account exists with this email, you will receive reset instructions.",
+                "debug": f"Email disabled. Reset link: {FRONTEND_URL}/reset-password?token={reset_token}"
+            }
+        
+        # Queue email sending in background
+        logger.info(f"📧 Queueing password reset email to: {user['email']}")
         background_tasks.add_task(
             send_password_reset_email,
             email=user['email'],
             reset_token=reset_token,
             full_name=user.get('full_name', 'Student')
         )
+        logger.info(f"✅ Email task queued successfully")
         
-        logger.info(f"✅ Password reset email queued for: {request.email}")
-        
-        # Return immediately without waiting for email to send
+        # Return immediately
         return {
             "success": True,
             "message": "If an account exists with this email, you will receive reset instructions."
@@ -1863,6 +1878,7 @@ async def forgot_password(
         
     except PyMongoError as e:
         logger.error(f"❌ Database error in forgot_password: {e}")
+        logger.error(traceback.format_exc())
         # Still return success for security
         return {
             "success": True,
@@ -1876,6 +1892,7 @@ async def forgot_password(
             "success": True,
             "message": "If an account exists with this email, you will receive reset instructions."
         }
+
 @api_router.post("/auth/reset-password")
 async def reset_password(request: ResetPasswordRequest):
     """
@@ -1883,16 +1900,20 @@ async def reset_password(request: ResetPasswordRequest):
     """
     try:
         logger.info("🔐 Password reset attempt with token")
+        logger.info(f"Token length: {len(request.token)}")
         
         # Verify token
         try:
             payload = jwt.decode(request.token, SECRET_KEY, algorithms=[ALGORITHM])
+            logger.info(f"✅ Token decoded successfully for user: {payload.get('sub')}")
         except jwt.ExpiredSignatureError:
+            logger.error("❌ Token has expired")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Reset token has expired. Please request a new one."
             )
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
+            logger.error(f"❌ Invalid token: {e}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid reset token. Please request a new one."
@@ -1900,6 +1921,7 @@ async def reset_password(request: ResetPasswordRequest):
         
         # Check token type
         if payload.get('type') != 'password_reset':
+            logger.error(f"❌ Invalid token type: {payload.get('type')}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid token type"
@@ -1907,6 +1929,7 @@ async def reset_password(request: ResetPasswordRequest):
         
         user_id = payload.get('sub')
         if not user_id:
+            logger.error("❌ No user ID in token payload")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid token payload"
@@ -1920,16 +1943,20 @@ async def reset_password(request: ResetPasswordRequest):
         })
         
         if not token_record:
+            logger.error("❌ Token not found in database or already used")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or expired reset token"
             )
         
+        logger.info(f"✅ Token verified for user: {user_id}")
+        
         # Hash new password
         hashed_password = hash_password(request.new_password)
+        logger.info("✅ New password hashed")
         
         # Update user password
-        await db.users.update_one(
+        result = await db.users.update_one(
             {"id": user_id},
             {
                 "$set": {
@@ -1939,11 +1966,21 @@ async def reset_password(request: ResetPasswordRequest):
             }
         )
         
+        if result.modified_count == 0:
+            logger.error(f"❌ User not found: {user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        logger.info(f"✅ Password updated for user: {user_id}")
+        
         # Mark token as used
         await password_reset_tokens.update_one(
             {"token": request.token},
             {"$set": {"used": True, "used_at": datetime.now(timezone.utc)}}
         )
+        logger.info(f"✅ Token marked as used")
         
         logger.info(f"✅ Password reset successful for user: {user_id}")
         
@@ -1956,6 +1993,7 @@ async def reset_password(request: ResetPasswordRequest):
         raise
     except PyMongoError as e:
         logger.error(f"❌ Database error in reset_password: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred. Please try again."
@@ -1974,6 +2012,8 @@ async def verify_reset_token(token: str):
     Verify if a reset token is valid
     """
     try:
+        logger.info(f"🔍 Verifying reset token: {token[:20]}...")
+        
         # Check if token exists and not used
         token_record = await password_reset_tokens.find_one({
             "token": token,
@@ -1982,14 +2022,194 @@ async def verify_reset_token(token: str):
         })
         
         if not token_record:
+            logger.warning("❌ Token invalid or expired")
             return {"valid": False}
         
+        logger.info("✅ Token is valid")
         return {"valid": True}
         
     except Exception as e:
-        logger.error(f"Error verifying token: {e}")
+        logger.error(f"❌ Error verifying token: {e}")
+        logger.error(traceback.format_exc())
         return {"valid": False}
 
+# Add this test endpoint to debug email issues
+@api_router.post("/test/email-debug")
+async def test_email_debug(request: ForgotPasswordRequest):
+    """
+    Debug endpoint to test email configuration
+    """
+    try:
+        logger.info("=" * 60)
+        logger.info("🔍 EMAIL DEBUG TEST")
+        logger.info("=" * 60)
+        
+        # Log email settings
+        logger.info(f"EMAIL_ENABLED: {EMAIL_ENABLED}")
+        logger.info(f"SMTP_SERVER: {SMTP_SERVER}")
+        logger.info(f"SMTP_PORT: {SMTP_PORT}")
+        logger.info(f"SMTP_USERNAME: {SMTP_USERNAME}")
+        logger.info(f"EMAIL_FROM: {EMAIL_FROM}")
+        
+        # Find user
+        user = await db.users.find_one({"email": request.email}, {"_id": 0})
+        if not user:
+            return {
+                "success": False,
+                "message": "User not found",
+                "email_settings": {
+                    "enabled": EMAIL_ENABLED,
+                    "server": SMTP_SERVER,
+                    "port": SMTP_PORT,
+                    "username": SMTP_USERNAME,
+                    "from": EMAIL_FROM
+                }
+            }
+        
+        # Generate test token
+        test_token = "test-token-" + str(uuid.uuid4())[:8]
+        
+        # Try to send test email directly
+        try:
+            logger.info(f"📧 Attempting to send test email to: {request.email}")
+            
+            # Import smtplib here
+            import smtplib
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
+            
+            # Create message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = "🔧 CubeNotes Email Test"
+            msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
+            msg['To'] = request.email
+            msg['Reply-To'] = EMAIL_FROM
+            
+            # Simple test content
+            text = f"""🔧 EMAIL TEST
+
+Hello {user.get('full_name', 'Student')},
+
+This is a test email from CubeNotes to verify your email configuration.
+
+If you received this, your email is working correctly!
+
+Reset link would be: {FRONTEND_URL}/reset-password?token={test_token}
+
+Best regards,
+CubeNotes Team"""
+            
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>CubeNotes Email Test</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
+    <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <h1 style="color: #4F46E5; text-align: center;">🔧 CubeNotes Email Test</h1>
+        <p style="font-size: 16px; color: #333;">Hello <strong>{user.get('full_name', 'Student')}</strong>,</p>
+        <p style="font-size: 16px; color: #333;">This is a test email from CubeNotes to verify your email configuration.</p>
+        <div style="background-color: #10B981; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 20px 0;">
+            <p style="font-size: 18px; margin: 0;">✅ If you received this, your email is working correctly!</p>
+        </div>
+        <p style="font-size: 14px; color: #666; text-align: center; margin-top: 20px;">
+            Reset link would be: <code style="background-color: #f0f0f0; padding: 5px; border-radius: 3px;">{FRONTEND_URL}/reset-password?token={test_token}</code>
+        </p>
+        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+        <p style="font-size: 12px; color: #999; text-align: center;">
+            &copy; {datetime.now().year} CubeNotes. All rights reserved.
+        </p>
+    </div>
+</body>
+</html>"""
+            
+            msg.attach(MIMEText(text, 'plain'))
+            msg.attach(MIMEText(html, 'html'))
+            
+            # Try to connect and send
+            results = {
+                "port_465_ssl": False,
+                "port_587_tls": False,
+                "port_25_plain": False
+            }
+            
+            # Try SSL on port 465
+            try:
+                logger.info("📧 Testing SSL on port 465...")
+                server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=10)
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(msg)
+                server.quit()
+                logger.info("✅ SSL on port 465 SUCCESSFUL!")
+                results["port_465_ssl"] = True
+            except Exception as e:
+                logger.warning(f"⚠️ SSL port 465 failed: {e}")
+            
+            # Try TLS on port 587
+            try:
+                logger.info("📧 Testing TLS on port 587...")
+                server = smtplib.SMTP(SMTP_SERVER, 587, timeout=10)
+                server.starttls()
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(msg)
+                server.quit()
+                logger.info("✅ TLS on port 587 SUCCESSFUL!")
+                results["port_587_tls"] = True
+            except Exception as e:
+                logger.warning(f"⚠️ TLS port 587 failed: {e}")
+            
+            # Try plain on port 25
+            try:
+                logger.info("📧 Testing plain on port 25...")
+                server = smtplib.SMTP(SMTP_SERVER, 25, timeout=10)
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(msg)
+                server.quit()
+                logger.info("✅ Plain on port 25 SUCCESSFUL!")
+                results["port_25_plain"] = True
+            except Exception as e:
+                logger.warning(f"⚠️ Plain port 25 failed: {e}")
+            
+            # Determine if any method worked
+            any_success = any(results.values())
+            
+            if any_success:
+                working_ports = [port for port, worked in results.items() if worked]
+                suggestion = f"Use one of these ports: {', '.join(working_ports)}"
+            else:
+                suggestion = "No connection methods worked. Check firewall/security settings."
+            
+            return {
+                "success": any_success,
+                "message": "Email test completed",
+                "user": user.get('email'),
+                "email_settings": {
+                    "enabled": EMAIL_ENABLED,
+                    "server": SMTP_SERVER,
+                    "configured_port": SMTP_PORT,
+                    "username": SMTP_USERNAME,
+                    "from": EMAIL_FROM
+                },
+                "test_results": results,
+                "suggestion": suggestion
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Test email error: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Debug endpoint error: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 # ==================== TEST NOTIFICATION ENDPOINT ====================
 @api_router.post("/test/send-notification")
 async def test_notification(
