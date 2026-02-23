@@ -1363,7 +1363,7 @@ CubeNotes Team"""
         return False
 
 async def send_password_reset_email(email: str, reset_token: str, full_name: str):
-    """Send beautifully styled password reset email"""
+    """Send beautifully styled password reset email with increased timeout"""
     try:
         if not EMAIL_ENABLED:
             logger.warning(f"⚠️ Email is disabled. Would send reset email to: {email}")
@@ -1482,23 +1482,74 @@ CubeNotes Team"""
         msg.attach(MIMEText(text, 'plain', 'utf-8'))
         msg.attach(MIMEText(full_html, 'html', 'utf-8'))
         
-        # Send email
-        logger.info(f"📧 Sending password reset email to: {email}")
+        # Send email with increased timeout
+        logger.info(f"📧 Sending password reset email to: {email} (timeout: 60s)")
         
-        # Use SMTP_SSL for port 465 or starttls for 587
-        if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
-        else:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-            server.starttls()
+        # Try different connection methods with increased timeout
+        last_error = None
+        
+        # Method 1: Try configured port first with increased timeout
+        try:
+            logger.info(f"📧 Method 1: Connecting to {SMTP_SERVER}:{SMTP_PORT} with timeout 60s...")
             
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
+            if SMTP_PORT == 465:
+                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=60)
+            else:
+                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=60)
+                server.starttls()
+            
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            
+            logger.info(f"✅ Password reset email sent successfully to: {email}")
+            return True
+            
+        except Exception as e:
+            last_error = e
+            logger.warning(f"⚠️ Method 1 failed: {e}")
+            
+            # Method 2: Try SSL on port 465 with increased timeout
+            try:
+                logger.info("📧 Method 2: Trying SSL on port 465 with timeout 60s...")
+                server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=60)
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(msg)
+                server.quit()
+                
+                logger.info(f"✅ Password reset email sent via SSL port 465 to: {email}")
+                # Update port for future use
+                logger.info(f"💡 SUGGESTION: Change SMTP_PORT to 465 in .env")
+                return True
+                
+            except Exception as e2:
+                logger.warning(f"⚠️ Method 2 failed: {e2}")
+                
+                # Method 3: Try TLS on port 587 with increased timeout
+                try:
+                    logger.info("📧 Method 3: Trying TLS on port 587 with timeout 60s...")
+                    server = smtplib.SMTP(SMTP_SERVER, 587, timeout=60)
+                    server.starttls()
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                    server.send_message(msg)
+                    server.quit()
+                    
+                    logger.info(f"✅ Password reset email sent via TLS port 587 to: {email}")
+                    # Update port for future use
+                    logger.info(f"💡 SUGGESTION: Change SMTP_PORT to 587 in .env")
+                    return True
+                    
+                except Exception as e3:
+                    logger.error(f"❌ All connection methods failed")
+                    logger.error(f"Method 1 error: {last_error}")
+                    logger.error(f"Method 2 error: {e2}")
+                    logger.error(f"Method 3 error: {e3}")
+                    raise Exception(f"All connection methods failed. Last error: {e3}")
         
-        logger.info(f"✅ Password reset email sent successfully to: {email}")
-        return True
-        
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(f"❌ SMTP Authentication Error: {e}")
+        logger.error("Check your email username and password")
+        return False
     except Exception as e:
         logger.error(f"❌ Failed to send password reset email: {e}")
         logger.error(traceback.format_exc())
