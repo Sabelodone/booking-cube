@@ -114,13 +114,24 @@ logger.info(f"✅ PayFast LIVE configured for Merchant ID: {PAYFAST_MERCHANT_ID}
 logger.info(f"✅ PayFast Notify URL: {PAYFAST_NOTIFY_URL}")
 logger.info(f"✅ PayFast Passphrase length: {len(PAYFAST_PASSPHRASE)}")
 
-# Email Configuration
+# ==================== RESEND EMAIL CONFIGURATION ====================
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
+RESEND_API_URL = "https://api.resend.com/emails"
+
+# Email Configuration (SMTP fallback)
 SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
 SMTP_USERNAME = os.environ.get('SMTP_USERNAME', '')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
 EMAIL_FROM = os.environ.get('EMAIL_FROM', 'noreply@tutorhub.com')
 EMAIL_ENABLED = os.environ.get('EMAIL_ENABLED', 'false').lower() == 'true'
+
+# Override EMAIL_ENABLED if Resend is configured
+if RESEND_API_KEY:
+    EMAIL_ENABLED = True
+    logger.info("✅ Resend API configured for primary email delivery")
+else:
+    logger.warning("⚠️ RESEND_API_KEY not set - will use SMTP fallback only")
 
 # WhatsApp Configuration
 TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
@@ -493,6 +504,61 @@ def generate_payfast_signature(data: dict, passphrase: str) -> str:
         logger.error(f"❌ Error generating PayFast signature: {e}")
         logger.error(traceback.format_exc())
         return ""
+
+# ==================== RESEND EMAIL HELPER ====================
+async def send_email_via_resend(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    text_content: str = "",
+    from_email: str = EMAIL_FROM
+) -> bool:
+    """
+    Send email using Resend API
+    """
+    try:
+        if not RESEND_API_KEY:
+            logger.error("❌ RESEND_API_KEY not configured")
+            return False
+        
+        # Prepare the payload
+        payload = {
+            "from": from_email,
+            "to": [to_email],
+            "subject": subject,
+            "html": html_content,
+            "text": text_content or "Please view this email in an HTML compatible client."
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        logger.info(f"📧 Sending via Resend to: {to_email}")
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                RESEND_API_URL,
+                json=payload,
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"✅ Resend email sent successfully: {result.get('id')}")
+                return True
+            else:
+                logger.error(f"❌ Resend API error: {response.status_code} - {response.text}")
+                return False
+                
+    except httpx.TimeoutException:
+        logger.error("❌ Resend API timeout")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Resend email error: {e}")
+        logger.error(traceback.format_exc())
+        return False
 
 # ==================== AUTH ROUTES ====================
 @api_router.post("/auth/signup", status_code=status.HTTP_201_CREATED)
@@ -1165,26 +1231,17 @@ async def initiate_payment(
 
 # ==================== NOTIFICATION HELPER FUNCTIONS ====================
 async def send_booking_confirmation_email(user_email: str, user_name: str, booking_details: dict, session_details: dict):
-    """Send beautifully styled booking confirmation email"""
+    """Send beautifully styled booking confirmation email - with Resend first, fallback to SMTP"""
     try:
         if not EMAIL_ENABLED:
             logger.warning(f"⚠️ Email is disabled. Would send confirmation to: {user_email}")
             return True
-        
+
         logger.info(f"📧 Attempting to send booking confirmation to: {user_email}")
-        logger.info(f"📧 SMTP Config - Server: {SMTP_SERVER}, Port: {SMTP_PORT}, User: {SMTP_USERNAME}")
         
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = "✅ Booking Confirmed! 🎓 Your Session is Ready - CubeNotes"
-        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
-        msg['To'] = user_email
-        msg['Reply-To'] = EMAIL_FROM
-        msg['X-Priority'] = '1'
-        
-        # Format price in Rands - SHOW FULL AMOUNT
-        amount_rands = booking_details['amount']  
-        
+        # Format price in Rands
+        amount_rands = booking_details['amount']
+
         # Logo HTML
         logo_html = ""
         if LOGO_BASE64:
@@ -1197,7 +1254,7 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
                 </td>
             </tr>
             '''
-        
+
         # Create content HTML
         content_html = f"""
             <h2 style="margin: 0 0 20px 0; color: {EMAIL_STYLES['text']}; font-size: 28px; font-weight: 700; text-align: center;">
@@ -1291,7 +1348,7 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
                 Contact us anytime - we're here to help!
             </p>
         """
-        
+
         # Plain text version
         text = f"""✅ BOOKING CONFIRMED - CubeNotes
 
@@ -1320,66 +1377,76 @@ Need help?
 
 Best regards,
 CubeNotes Team"""
-        
+
         # Attach content to template
         full_html = get_email_template(content_html, logo_html)
+
+        # TRY RESEND FIRST (if API key exists)
+        if RESEND_API_KEY:
+            logger.info("📧 Attempting to send via Resend API...")
+            resend_success = await send_email_via_resend(
+                to_email=user_email,
+                subject="✅ Booking Confirmed! 🎓 Your Session is Ready - CubeNotes",
+                html_content=full_html,
+                text_content=text,
+                from_email=EMAIL_FROM
+            )
+            
+            if resend_success:
+                logger.info(f"✅ Booking confirmation email sent via Resend to: {user_email}")
+                return True
+            else:
+                logger.warning("⚠️ Resend failed, falling back to SMTP...")
         
-        # Clear any existing content and attach
+        # FALLBACK TO SMTP
+        logger.info("📧 Falling back to SMTP...")
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "✅ Booking Confirmed! 🎓 Your Session is Ready - CubeNotes"
+        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
+        msg['To'] = user_email
+        msg['Reply-To'] = EMAIL_FROM
+        msg['X-Priority'] = '1'
+
         msg.set_charset('utf-8')
         msg.attach(MIMEText(text, 'plain', 'utf-8'))
         msg.attach(MIMEText(full_html, 'html', 'utf-8'))
-        
+
         # Send email
         logger.info(f"📧 Connecting to SMTP server {SMTP_SERVER}:{SMTP_PORT}...")
-        
-        # Use SMTP_SSL for port 465 or starttls for 587
+
         if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30)
         else:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
             server.starttls()
-            
+
         logger.info(f"📧 Logging in as {SMTP_USERNAME}...")
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        
+
         logger.info(f"📧 Sending message to {user_email}...")
         server.send_message(msg)
         server.quit()
-        
-        logger.info(f"✅ Booking confirmation email sent to: {user_email}")
+
+        logger.info(f"✅ Booking confirmation email sent via SMTP to: {user_email}")
         return True
-        
-    except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"❌ SMTP Authentication Error: {e}")
-        logger.error("Check your email username and password")
-        return False
-    except smtplib.SMTPException as e:
-        logger.error(f"❌ SMTP Error: {e}")
-        logger.error(traceback.format_exc())
-        return False
+
     except Exception as e:
         logger.error(f"❌ Failed to send booking confirmation email: {e}")
         logger.error(traceback.format_exc())
         return False
 
 async def send_password_reset_email(email: str, reset_token: str, full_name: str):
-    """Send beautifully styled password reset email with increased timeout"""
+    """Send password reset email - with Resend first, fallback to SMTP"""
     try:
         if not EMAIL_ENABLED:
             logger.warning(f"⚠️ Email is disabled. Would send reset email to: {email}")
             logger.warning(f"Reset link: {FRONTEND_URL}/reset-password?token={reset_token}")
             return True
-        
+
         reset_link = f"{FRONTEND_URL}/reset-password?token={reset_token}"
-        
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = "🔐 Reset Your Password - CubeNotes"
-        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
-        msg['To'] = email
-        msg['Reply-To'] = EMAIL_FROM
-        msg['X-Priority'] = '1'
-        
+
         # Logo HTML
         logo_html = ""
         if LOGO_BASE64:
@@ -1390,7 +1457,7 @@ async def send_password_reset_email(email: str, reset_token: str, full_name: str
                 </td>
             </tr>
             '''
-        
+
         # Create content HTML
         content_html = f"""
             <h2 style="margin: 0 0 10px 0; color: {EMAIL_STYLES['text']}; font-size: 28px; font-weight: 700; text-align: center;">
@@ -1452,7 +1519,7 @@ async def send_password_reset_email(email: str, reset_token: str, full_name: str
                 📧 info@techartistrydesigns.com | 📱 074 642 2396
             </p>
         """
-        
+
         # Plain text version
         text = f"""🔐 PASSWORD RESET REQUEST - CubeNotes
 
@@ -1473,83 +1540,66 @@ Need help?
 
 Best regards,
 CubeNotes Team"""
-        
+
         # Attach content to template
         full_html = get_email_template(content_html, logo_html)
+
+        # TRY RESEND FIRST (if API key exists)
+        if RESEND_API_KEY:
+            logger.info("📧 Attempting to send password reset via Resend API...")
+            resend_success = await send_email_via_resend(
+                to_email=email,
+                subject="🔐 Reset Your Password - CubeNotes",
+                html_content=full_html,
+                text_content=text,
+                from_email=EMAIL_FROM
+            )
+            
+            if resend_success:
+                logger.info(f"✅ Password reset email sent via Resend to: {email}")
+                return True
+            else:
+                logger.warning("⚠️ Resend failed, falling back to SMTP...")
+
+        # FALLBACK TO SMTP
+        logger.info("📧 Falling back to SMTP for password reset...")
         
-        # Clear any existing content and attach
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "🔐 Reset Your Password - CubeNotes"
+        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
+        msg['To'] = email
+        msg['Reply-To'] = EMAIL_FROM
+        msg['X-Priority'] = '1'
+
         msg.set_charset('utf-8')
         msg.attach(MIMEText(text, 'plain', 'utf-8'))
         msg.attach(MIMEText(full_html, 'html', 'utf-8'))
-        
-        # Send email with increased timeout
-        logger.info(f"📧 Sending password reset email to: {email} (timeout: 60s)")
-        
+
         # Try different connection methods with increased timeout
         last_error = None
-        
-        # Method 1: Try configured port first with increased timeout
+
+        # Method 1: Try configured port first
         try:
-            logger.info(f"📧 Method 1: Connecting to {SMTP_SERVER}:{SMTP_PORT} with timeout 60s...")
+            logger.info(f"📧 Connecting to {SMTP_SERVER}:{SMTP_PORT}...")
             
             if SMTP_PORT == 465:
-                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=60)
+                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30)
             else:
-                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=60)
+                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
                 server.starttls()
             
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(msg)
             server.quit()
             
-            logger.info(f"✅ Password reset email sent successfully to: {email}")
+            logger.info(f"✅ Password reset email sent via SMTP to: {email}")
             return True
             
         except Exception as e:
-            last_error = e
-            logger.warning(f"⚠️ Method 1 failed: {e}")
-            
-            # Method 2: Try SSL on port 465 with increased timeout
-            try:
-                logger.info("📧 Method 2: Trying SSL on port 465 with timeout 60s...")
-                server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=60)
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                server.send_message(msg)
-                server.quit()
-                
-                logger.info(f"✅ Password reset email sent via SSL port 465 to: {email}")
-                # Update port for future use
-                logger.info(f"💡 SUGGESTION: Change SMTP_PORT to 465 in .env")
-                return True
-                
-            except Exception as e2:
-                logger.warning(f"⚠️ Method 2 failed: {e2}")
-                
-                # Method 3: Try TLS on port 587 with increased timeout
-                try:
-                    logger.info("📧 Method 3: Trying TLS on port 587 with timeout 60s...")
-                    server = smtplib.SMTP(SMTP_SERVER, 587, timeout=60)
-                    server.starttls()
-                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                    server.send_message(msg)
-                    server.quit()
-                    
-                    logger.info(f"✅ Password reset email sent via TLS port 587 to: {email}")
-                    # Update port for future use
-                    logger.info(f"💡 SUGGESTION: Change SMTP_PORT to 587 in .env")
-                    return True
-                    
-                except Exception as e3:
-                    logger.error(f"❌ All connection methods failed")
-                    logger.error(f"Method 1 error: {last_error}")
-                    logger.error(f"Method 2 error: {e2}")
-                    logger.error(f"Method 3 error: {e3}")
-                    raise Exception(f"All connection methods failed. Last error: {e3}")
-        
-    except smtplib.SMTPAuthenticationError as e:
-        logger.error(f"❌ SMTP Authentication Error: {e}")
-        logger.error("Check your email username and password")
-        return False
+            logger.warning(f"⚠️ SMTP failed: {e}")
+            return False
+
     except Exception as e:
         logger.error(f"❌ Failed to send password reset email: {e}")
         logger.error(traceback.format_exc())
@@ -1575,7 +1625,7 @@ async def send_booking_confirmation_whatsapp(user_phone: str, user_name: str, bo
             to_number = user_phone
         
         # Format price in Rands - SHOW FULL AMOUNT
-        amount_rands = booking_details['amount']  # ← REMOVED /100
+        amount_rands = booking_details['amount']
         
         # Generate class link
         class_link = f"{FRONTEND_URL}/class/{booking_details['id']}"
@@ -1594,7 +1644,7 @@ Subject: {session_details['subject']}
 📅 Date: {session_details['date']}
 ⏰ Time: {session_details['start_time']}
 👥 Type: {session_details['session_type'].replace('_', ' ').title()}
-💰 Amount: R{amount_rands}  # ← REMOVED .2f
+💰 Amount: R{amount_rands}
 {f'📝 Notes: "{booking_details["student_notes"]}"' if booking_details.get('student_notes') else ''}
 *═══════════════════*
 
@@ -2097,6 +2147,7 @@ async def test_email_debug(request: ForgotPasswordRequest):
         
         # Log email settings
         logger.info(f"EMAIL_ENABLED: {EMAIL_ENABLED}")
+        logger.info(f"RESEND_API_KEY configured: {bool(RESEND_API_KEY)}")
         logger.info(f"SMTP_SERVER: {SMTP_SERVER}")
         logger.info(f"SMTP_PORT: {SMTP_PORT}")
         logger.info(f"SMTP_USERNAME: {SMTP_USERNAME}")
@@ -2110,6 +2161,7 @@ async def test_email_debug(request: ForgotPasswordRequest):
                 "message": "User not found",
                 "email_settings": {
                     "enabled": EMAIL_ENABLED,
+                    "resend_configured": bool(RESEND_API_KEY),
                     "server": SMTP_SERVER,
                     "port": SMTP_PORT,
                     "username": SMTP_USERNAME,
@@ -2120,140 +2172,135 @@ async def test_email_debug(request: ForgotPasswordRequest):
         # Generate test token
         test_token = "test-token-" + str(uuid.uuid4())[:8]
         
-        # Try to send test email directly
-        try:
-            logger.info(f"📧 Attempting to send test email to: {request.email}")
+        # Try to send test email via Resend first
+        if RESEND_API_KEY:
+            logger.info("📧 Testing Resend API...")
             
-            # Import smtplib here
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.mime.multipart import MIMEMultipart
+            test_html = f"""
+            <h2>Resend Test Email</h2>
+            <p>Hello {user.get('full_name', 'Student')},</p>
+            <p>This is a test email from CubeNotes sent via <strong>Resend API</strong>.</p>
+            <p>Reset link would be: {FRONTEND_URL}/reset-password?token={test_token}</p>
+            """
             
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = "🔧 CubeNotes Email Test"
-            msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
-            msg['To'] = request.email
-            msg['Reply-To'] = EMAIL_FROM
+            test_text = f"Resend Test - Reset link: {FRONTEND_URL}/reset-password?token={test_token}"
             
-            # Simple test content
-            text = f"""🔧 EMAIL TEST
+            resend_result = await send_email_via_resend(
+                to_email=request.email,
+                subject="🔧 CubeNotes Resend Test",
+                html_content=test_html,
+                text_content=test_text
+            )
+            
+            if resend_result:
+                return {
+                    "success": True,
+                    "message": "Test email sent via Resend successfully",
+                    "method": "resend",
+                    "user": user.get('email')
+                }
+        
+        # Fall back to SMTP test
+        logger.info("📧 Testing SMTP...")
+        
+        # Import smtplib here
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = "🔧 CubeNotes SMTP Test"
+        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
+        msg['To'] = request.email
+        msg['Reply-To'] = EMAIL_FROM
+        
+        # Simple test content
+        text = f"""🔧 SMTP TEST
 
 Hello {user.get('full_name', 'Student')},
 
-This is a test email from CubeNotes to verify your email configuration.
+This is a test email from CubeNotes via SMTP.
 
-If you received this, your email is working correctly!
+Reset link would be: {FRONTEND_URL}/reset-password?token={test_token}"""
 
-Reset link would be: {FRONTEND_URL}/reset-password?token={test_token}
-
-Best regards,
-CubeNotes Team"""
-            
-            html = f"""<!DOCTYPE html>
+        html = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>CubeNotes Email Test</title>
+    <title>CubeNotes SMTP Test</title>
 </head>
 <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
     <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-        <h1 style="color: #4F46E5; text-align: center;">🔧 CubeNotes Email Test</h1>
+        <h1 style="color: #4F46E5; text-align: center;">🔧 CubeNotes SMTP Test</h1>
         <p style="font-size: 16px; color: #333;">Hello <strong>{user.get('full_name', 'Student')}</strong>,</p>
-        <p style="font-size: 16px; color: #333;">This is a test email from CubeNotes to verify your email configuration.</p>
-        <div style="background-color: #10B981; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 20px 0;">
-            <p style="font-size: 18px; margin: 0;">✅ If you received this, your email is working correctly!</p>
-        </div>
+        <p style="font-size: 16px; color: #333;">This is a test email from CubeNotes via SMTP.</p>
         <p style="font-size: 14px; color: #666; text-align: center; margin-top: 20px;">
             Reset link would be: <code style="background-color: #f0f0f0; padding: 5px; border-radius: 3px;">{FRONTEND_URL}/reset-password?token={test_token}</code>
-        </p>
-        <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-        <p style="font-size: 12px; color: #999; text-align: center;">
-            &copy; {datetime.now().year} CubeNotes. All rights reserved.
         </p>
     </div>
 </body>
 </html>"""
-            
-            msg.attach(MIMEText(text, 'plain'))
-            msg.attach(MIMEText(html, 'html'))
-            
-            # Try to connect and send
-            results = {
-                "port_465_ssl": False,
-                "port_587_tls": False,
-                "port_25_plain": False
-            }
-            
-            # Try SSL on port 465
-            try:
-                logger.info("📧 Testing SSL on port 465...")
-                server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=10)
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                server.send_message(msg)
-                server.quit()
-                logger.info("✅ SSL on port 465 SUCCESSFUL!")
-                results["port_465_ssl"] = True
-            except Exception as e:
-                logger.warning(f"⚠️ SSL port 465 failed: {e}")
-            
-            # Try TLS on port 587
-            try:
-                logger.info("📧 Testing TLS on port 587...")
-                server = smtplib.SMTP(SMTP_SERVER, 587, timeout=10)
-                server.starttls()
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                server.send_message(msg)
-                server.quit()
-                logger.info("✅ TLS on port 587 SUCCESSFUL!")
-                results["port_587_tls"] = True
-            except Exception as e:
-                logger.warning(f"⚠️ TLS port 587 failed: {e}")
-            
-            # Try plain on port 25
-            try:
-                logger.info("📧 Testing plain on port 25...")
-                server = smtplib.SMTP(SMTP_SERVER, 25, timeout=10)
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                server.send_message(msg)
-                server.quit()
-                logger.info("✅ Plain on port 25 SUCCESSFUL!")
-                results["port_25_plain"] = True
-            except Exception as e:
-                logger.warning(f"⚠️ Plain port 25 failed: {e}")
-            
-            # Determine if any method worked
-            any_success = any(results.values())
-            
-            if any_success:
-                working_ports = [port for port, worked in results.items() if worked]
-                suggestion = f"Use one of these ports: {', '.join(working_ports)}"
-            else:
-                suggestion = "No connection methods worked. Check firewall/security settings."
-            
-            return {
-                "success": any_success,
-                "message": "Email test completed",
-                "user": user.get('email'),
-                "email_settings": {
-                    "enabled": EMAIL_ENABLED,
-                    "server": SMTP_SERVER,
-                    "configured_port": SMTP_PORT,
-                    "username": SMTP_USERNAME,
-                    "from": EMAIL_FROM
-                },
-                "test_results": results,
-                "suggestion": suggestion
-            }
-            
+        
+        msg.attach(MIMEText(text, 'plain'))
+        msg.attach(MIMEText(html, 'html'))
+        
+        # Try to connect and send
+        results = {
+            "port_465_ssl": False,
+            "port_587_tls": False
+        }
+        
+        # Try SSL on port 465
+        try:
+            logger.info("📧 Testing SSL on port 465...")
+            server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=10)
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            logger.info("✅ SSL on port 465 SUCCESSFUL!")
+            results["port_465_ssl"] = True
         except Exception as e:
-            logger.error(f"❌ Test email error: {e}")
-            logger.error(traceback.format_exc())
-            return {
-                "success": False,
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }
+            logger.warning(f"⚠️ SSL port 465 failed: {e}")
+        
+        # Try TLS on port 587
+        try:
+            logger.info("📧 Testing TLS on port 587...")
+            server = smtplib.SMTP(SMTP_SERVER, 587, timeout=10)
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            logger.info("✅ TLS on port 587 SUCCESSFUL!")
+            results["port_587_tls"] = True
+        except Exception as e:
+            logger.warning(f"⚠️ TLS port 587 failed: {e}")
+        
+        # Determine if any method worked
+        any_success = any(results.values())
+        
+        if any_success:
+            working_ports = [port for port, worked in results.items() if worked]
+            suggestion = f"Use one of these ports: {', '.join(working_ports)}"
+        else:
+            suggestion = "No connection methods worked. Use Resend instead (recommended)."
+        
+        return {
+            "success": any_success,
+            "message": "SMTP test completed",
+            "method": "smtp" if any_success else "failed",
+            "user": user.get('email'),
+            "email_settings": {
+                "enabled": EMAIL_ENABLED,
+                "resend_configured": bool(RESEND_API_KEY),
+                "server": SMTP_SERVER,
+                "configured_port": SMTP_PORT,
+                "username": SMTP_USERNAME,
+                "from": EMAIL_FROM
+            },
+            "test_results": results,
+            "suggestion": suggestion
+        }
             
     except Exception as e:
         logger.error(f"❌ Debug endpoint error: {e}")
@@ -2261,6 +2308,67 @@ CubeNotes Team"""
             "success": False,
             "error": str(e)
         }
+
+# ==================== TEST RESEND ENDPOINT ====================
+@api_router.post("/test/resend")
+async def test_resend(
+    email: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Test Resend email configuration
+    """
+    try:
+        test_email = email or current_user.email
+        
+        # Simple test HTML
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Resend Test</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px;">
+            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 20px; padding: 40px; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+                <h1 style="color: #4F46E5; text-align: center;">✅ Resend Test Successful!</h1>
+                <p style="font-size: 16px; color: #333;">Hello {current_user.full_name},</p>
+                <p style="font-size: 16px; color: #333;">This email was sent using <strong>Resend API</strong> instead of SMTP.</p>
+                <div style="background: #f3f4f6; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                    <p style="margin: 0; color: #4F46E5; font-family: monospace;">
+                        ✓ No more SMTP blocking issues!
+                    </p>
+                </div>
+                <p style="color: #666; font-size: 14px; text-align: center;">
+                    Sent at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        text = f"Resend Test - Hello {current_user.full_name}, this email was sent via Resend API!"
+        
+        result = await send_email_via_resend(
+            to_email=test_email,
+            subject="✅ Resend API Test - CubeNotes",
+            html_content=html,
+            text_content=text
+        )
+        
+        return {
+            "success": result,
+            "message": "Test email sent via Resend" if result else "Resend failed",
+            "email": test_email,
+            "resend_configured": bool(RESEND_API_KEY)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Test resend error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
 # ==================== TEST NOTIFICATION ENDPOINT ====================
 @api_router.post("/test/send-notification")
 async def test_notification(
