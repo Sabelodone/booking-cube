@@ -1561,7 +1561,7 @@ CubeNotes Team"""
             else:
                 logger.warning("⚠️ Resend failed, falling back to SMTP...")
 
-        # FALLBACK TO SMTP
+        # FALLBACK TO SMTP (only if Resend failed or not configured)
         logger.info("📧 Falling back to SMTP for password reset...")
         
         # Create message
@@ -1576,12 +1576,9 @@ CubeNotes Team"""
         msg.attach(MIMEText(text, 'plain', 'utf-8'))
         msg.attach(MIMEText(full_html, 'html', 'utf-8'))
 
-        # Try different connection methods with increased timeout
-        last_error = None
-
-        # Method 1: Try configured port first
+        # Try to send via SMTP
         try:
-            logger.info(f"📧 Connecting to {SMTP_SERVER}:{SMTP_PORT}...")
+            logger.info(f"📧 Connecting to SMTP server {SMTP_SERVER}:{SMTP_PORT}...")
             
             if SMTP_PORT == 465:
                 server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30)
@@ -1589,7 +1586,10 @@ CubeNotes Team"""
                 server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
                 server.starttls()
             
+            logger.info(f"📧 Logging in as {SMTP_USERNAME}...")
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            
+            logger.info(f"📧 Sending message to {email}...")
             server.send_message(msg)
             server.quit()
             
@@ -1597,7 +1597,7 @@ CubeNotes Team"""
             return True
             
         except Exception as e:
-            logger.warning(f"⚠️ SMTP failed: {e}")
+            logger.error(f"❌ SMTP failed: {e}")
             return False
 
     except Exception as e:
