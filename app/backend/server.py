@@ -1438,7 +1438,7 @@ CubeNotes Team"""
         return False
 
 async def send_password_reset_email(email: str, reset_token: str, full_name: str):
-    """Send password reset email - with Resend first, fallback to SMTP"""
+    """Send password reset email - Resend ONLY, no SMTP fallback"""
     try:
         if not EMAIL_ENABLED:
             logger.warning(f"⚠️ Email is disabled. Would send reset email to: {email}")
@@ -1544,60 +1544,26 @@ CubeNotes Team"""
         # Attach content to template
         full_html = get_email_template(content_html, logo_html)
 
-        # TRY RESEND FIRST (if API key exists)
-        if RESEND_API_KEY:
-            logger.info("📧 Attempting to send password reset via Resend API...")
-            resend_success = await send_email_via_resend(
-                to_email=email,
-                subject="🔐 Reset Your Password - CubeNotes",
-                html_content=full_html,
-                text_content=text,
-                from_email=EMAIL_FROM
-            )
-            
-            if resend_success:
-                logger.info(f"✅ Password reset email sent via Resend to: {email}")
-                return True
-            else:
-                logger.warning("⚠️ Resend failed, falling back to SMTP...")
+        # TRY RESEND ONLY (no SMTP fallback)
+        if not RESEND_API_KEY:
+            logger.error("❌ RESEND_API_KEY not configured - cannot send email")
+            return False
 
-        # FALLBACK TO SMTP (only if Resend failed or not configured)
-        logger.info("📧 Falling back to SMTP for password reset...")
+        logger.info("📧 Attempting to send password reset via Resend API...")
+        resend_success = await send_email_via_resend(
+            to_email=email,
+            subject="🔐 Reset Your Password - CubeNotes",
+            html_content=full_html,
+            text_content=text,
+            from_email=EMAIL_FROM
+        )
         
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = "🔐 Reset Your Password - CubeNotes"
-        msg['From'] = f"CubeNotes <{EMAIL_FROM}>"
-        msg['To'] = email
-        msg['Reply-To'] = EMAIL_FROM
-        msg['X-Priority'] = '1'
-
-        msg.set_charset('utf-8')
-        msg.attach(MIMEText(text, 'plain', 'utf-8'))
-        msg.attach(MIMEText(full_html, 'html', 'utf-8'))
-
-        # Try to send via SMTP
-        try:
-            logger.info(f"📧 Connecting to SMTP server {SMTP_SERVER}:{SMTP_PORT}...")
-            
-            if SMTP_PORT == 465:
-                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30)
-            else:
-                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-                server.starttls()
-            
-            logger.info(f"📧 Logging in as {SMTP_USERNAME}...")
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            
-            logger.info(f"📧 Sending message to {email}...")
-            server.send_message(msg)
-            server.quit()
-            
-            logger.info(f"✅ Password reset email sent via SMTP to: {email}")
+        if resend_success:
+            logger.info(f"✅ Password reset email sent via Resend to: {email}")
             return True
-            
-        except Exception as e:
-            logger.error(f"❌ SMTP failed: {e}")
+        else:
+            logger.error(f"❌ Resend failed to send email to: {email}")
+            # NO SMTP FALLBACK - just return False
             return False
 
     except Exception as e:
