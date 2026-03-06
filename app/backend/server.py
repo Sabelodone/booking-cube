@@ -1241,6 +1241,9 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
         
         # Format price in Rands
         amount_rands = booking_details['amount']
+        
+        # Determine if this is a Maths Boost package (R500 for 4 classes) or regular session (R200)
+        is_maths_boost = amount_rands == 500 or (booking_details.get('package') == 'maths_boost')
 
         # Logo HTML
         logo_html = ""
@@ -1254,6 +1257,117 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
                 </td>
             </tr>
             '''
+
+        # Create session details HTML (common for both)
+        session_details_html = f"""
+            <table width="100%" cellpadding="10" cellspacing="0" border="0">
+                <tr>
+                    <td width="40%" style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Subject:</td>
+                    <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['subject']}</td>
+                </tr>
+                <tr>
+                    <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Date:</td>
+                    <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['date']}</td>
+                </tr>
+                <tr>
+                    <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Time:</td>
+                    <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['start_time']} (90 minutes)</td>
+                </tr>
+                <tr>
+                    <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Session Type:</td>
+                    <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['session_type'].replace('_', ' ').title()}</td>
+                </tr>
+                <tr>
+                    <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Amount Paid:</td>
+                    <td style="color: {EMAIL_STYLES['success']}; font-size: 18px; font-weight: 700;">R{amount_rands}</td>
+                </tr>
+                {f'''
+                <tr>
+                    <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Your Notes:</td>
+                    <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-style: italic;">"{booking_details['student_notes']}"</td>
+                </tr>
+                ''' if booking_details.get('student_notes') else ''}
+            </table>
+        """
+        
+        # Create WhatsApp/Link card based on booking type
+        if is_maths_boost:
+            # Maths Boost Package (R500) - WhatsApp & Email info
+            link_card_html = f"""
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0; background: linear-gradient(135deg, #e8f5e9, #c8e6c9); border: 2px solid #25D366; border-radius: 20px;">
+                <tr>
+                    <td style="padding: 30px; text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">📱💬</div>
+                        <h3 style="margin: 0 0 15px 0; color: #075e54; font-size: 24px; font-weight: 700;">
+                            Your Class Link Will Be Sent!
+                        </h3>
+                        <p style="margin: 0 0 10px 0; color: #1a1a1a; font-size: 18px; font-weight: 600;">
+                            We'll send the meeting link to:
+                        </p>
+                        
+                        <!-- WhatsApp -->
+                        <div style="margin: 15px 0; background-color: #ffffff; padding: 15px 20px; border-radius: 50px; display: inline-block; width: 80%;">
+                            <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+                                <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" alt="WhatsApp" width="24" height="24" style="vertical-align: middle;">
+                                <span style="color: #075e54; font-size: 18px; font-weight: 600;">WhatsApp:</span>
+                                <span style="color: #1a1a1a; font-size: 18px; font-weight: 700;">{booking_details.get('user_phone', 'Your registered number')}</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Email -->
+                        <div style="margin: 15px 0; background-color: #ffffff; padding: 15px 20px; border-radius: 50px; display: inline-block; width: 80%;">
+                            <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M22 6C22 4.9 21.1 4 20 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V6ZM20 6L12 11L4 6H20ZM20 18H4V8L12 13L20 8V18Z" fill="#EA4335"/>
+                                </svg>
+                                <span style="color: #d44638; font-size: 18px; font-weight: 600;">Email:</span>
+                                <span style="color: #1a1a1a; font-size: 18px; font-weight: 700;">{user_email}</span>
+                            </div>
+                        </div>
+                        
+                        <p style="margin: 15px 0 0 0; color: #075e54; font-size: 15px; font-weight: 500;">
+                            💰 This payment is for your 4 classes as part of the Maths Boost package
+                        </p>
+                    </td>
+                </tr>
+            </table>
+            """
+            
+            # Plain text for Maths Boost
+            plain_text_extra = f"""
+📱 YOUR CLASS LINKS WILL BE SENT VIA:
+
+WhatsApp 📱: {booking_details.get('user_phone', 'Your registered number')}
+Email 📧: {user_email}
+
+💰 This payment is for your 4 classes as part of the Maths Boost package
+"""
+        else:
+            # Regular Session (R200) - Original WhatsApp card
+            link_card_html = f"""
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0; background-color: {EMAIL_STYLES['whatsapp_bg']}; border: 2px solid {EMAIL_STYLES['whatsapp']}; border-radius: 20px;">
+                <tr>
+                    <td style="padding: 30px; text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">📱</div>
+                        <h3 style="margin: 0 0 15px 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 22px; font-weight: 700;">
+                            Your Class Link Will Be Sent via WhatsApp
+                        </h3>
+                        <p style="margin: 0 0 10px 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 16px;">
+                            We'll send the meeting link to your WhatsApp number:
+                        </p>
+                        <p style="margin: 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 20px; font-weight: 700; background-color: #ffffff; padding: 12px 20px; border-radius: 50px; display: inline-block;">
+                            {booking_details.get('user_phone', 'Your registered number')}
+                        </p>
+                        <p style="margin: 20px 0 0 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 14px;">
+                            ⏰ Link will be sent 1 hour before the session
+                        </p>
+                    </td>
+                </tr>
+            </table>
+            """
+            
+            # Plain text for regular session
+            plain_text_extra = f"""📱 Your class link will be sent via WhatsApp to: {booking_details.get('user_phone', 'Your registered number')}"""
 
         # Create content HTML
         content_html = f"""
@@ -1277,58 +1391,12 @@ async def send_booking_confirmation_email(user_email: str, user_name: str, booki
                             📚 Session Details
                         </h3>
                         
-                        <table width="100%" cellpadding="10" cellspacing="0" border="0">
-                            <tr>
-                                <td width="40%" style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Subject:</td>
-                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['subject']}</td>
-                            </tr>
-                            <tr>
-                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Date:</td>
-                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['date']}</td>
-                            </tr>
-                            <tr>
-                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Time:</td>
-                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['start_time']} (90 minutes)</td>
-                            </tr>
-                            <tr>
-                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Session Type:</td>
-                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-weight: 600;">{session_details['session_type'].replace('_', ' ').title()}</td>
-                            </tr>
-                            <tr>
-                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Amount Paid:</td>
-                                <td style="color: {EMAIL_STYLES['success']}; font-size: 18px; font-weight: 700;">R{amount_rands}</td>
-                            </tr>
-                            {f'''
-                            <tr>
-                                <td style="color: {EMAIL_STYLES['text_light']}; font-size: 15px;">Your Notes:</td>
-                                <td style="color: {EMAIL_STYLES['text']}; font-size: 15px; font-style: italic;">"{booking_details['student_notes']}"</td>
-                            </tr>
-                            ''' if booking_details.get('student_notes') else ''}
-                        </table>
+                        {session_details_html}
                     </td>
                 </tr>
             </table>
             
-            <!-- WhatsApp Link Card -->
-            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0; background-color: {EMAIL_STYLES['whatsapp_bg']}; border: 2px solid {EMAIL_STYLES['whatsapp']}; border-radius: 20px;">
-                <tr>
-                    <td style="padding: 30px; text-align: center;">
-                        <div style="font-size: 48px; margin-bottom: 15px;">📱</div>
-                        <h3 style="margin: 0 0 15px 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 22px; font-weight: 700;">
-                            Your Class Link Will Be Sent via WhatsApp
-                        </h3>
-                        <p style="margin: 0 0 10px 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 16px;">
-                            We'll send the meeting link to your WhatsApp number:
-                        </p>
-                        <p style="margin: 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 20px; font-weight: 700; background-color: #ffffff; padding: 12px 20px; border-radius: 50px; display: inline-block;">
-                            {booking_details.get('user_phone', 'Your registered number')}
-                        </p>
-                        <p style="margin: 20px 0 0 0; color: {EMAIL_STYLES['whatsapp_text']}; font-size: 14px;">
-                            ⏰ Link will be sent 1 hour before the session
-                        </p>
-                    </td>
-                </tr>
-            </table>
+            {link_card_html}
             
             <!-- Action Button -->
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin: 30px 0;">
@@ -1367,8 +1435,9 @@ Amount: R{amount_rands}
 {f'Notes: "{booking_details["student_notes"]}"' if booking_details.get('student_notes') else ''}
 ══════════════════════════════
 
-📱 Your class link will be sent via WhatsApp to: {booking_details.get('user_phone', 'Your registered number')}
+{plain_text_extra}
 
+══════════════════════════════
 View your bookings: {FRONTEND_URL}/my-bookings
 
 Need help?
@@ -1436,7 +1505,6 @@ CubeNotes Team"""
         logger.error(f"❌ Failed to send booking confirmation email: {e}")
         logger.error(traceback.format_exc())
         return False
-
 async def send_password_reset_email(email: str, reset_token: str, full_name: str):
     """Send password reset email - Resend ONLY, no SMTP fallback"""
     try:
